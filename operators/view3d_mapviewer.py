@@ -153,7 +153,8 @@ class BaseMap(GeoScene):
 		'''Stop actual thread'''
 		if self.srv.running:
 			self.srv.stop()
-			self.thread.join()
+			if self.thread is not None:
+				self.thread.join()
 
 	def run(self):
 		"""thread method"""

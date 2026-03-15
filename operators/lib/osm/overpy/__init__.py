@@ -54,7 +54,7 @@ class Overpass(object):
         self.referer = referer
         self.user_agent = user_agent
         self.url = overpass_server
-        self._regex_extract_error_msg = re.compile(b"\<p\>(?P<msg>\<strong\s.*?)\</p\>")
+        self._regex_extract_error_msg = re.compile(rb"<p>(?P<msg><strong\s.*?)</p>")
         self._regex_remove_tag = re.compile(b"<[^>]*?>")
         if read_chunk_size is None:
             read_chunk_size = self.default_read_chunk_size

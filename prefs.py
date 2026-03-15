@@ -454,6 +454,7 @@ class BGIS_OT_add_predef_crs(Operator):
 	def execute(self, context):
 		if not SRS.validate(self.crs):
 			self.report({'ERROR'}, 'Invalid CRS')
+			return {'CANCELLED'}
 		if self.crs.isdigit():
 			self.crs = 'EPSG:' + self.crs
 		#append the new crs def to json string
@@ -625,7 +626,7 @@ class BGIS_OT_add_dem_server(Operator):
 	bl_label = "Add"
 	bl_options = {'INTERNAL'}
 
-	url: StringProperty(name = "Url template",  description = "Define url template string. Bounding box varaibles are {W}, {E}, {S} and {N}")
+	url: StringProperty(name = "Url template",  description = "Define url template string. Bounding box variables are {W}, {E}, {S} and {N}")
 	name: StringProperty(name = "Description", description = "Choose a convenient name for this server")
 	desc: StringProperty(name = "Description", description = "Add a description or comment about this remote datasource")
 
@@ -681,7 +682,7 @@ class BGIS_OT_edit_dem_server(Operator):
 	bl_label = "Edit"
 	bl_options = {'INTERNAL'}
 
-	url: StringProperty(name = "Url template",  description = "Define url template string. Bounding box varaibles are {W}, {E}, {S} and {N}")
+	url: StringProperty(name = "Url template",  description = "Define url template string. Bounding box variables are {W}, {E}, {S} and {N}")
 	name: StringProperty(name = "Description", description = "Choose a convenient name for this server")
 	desc: StringProperty(name = "Description", description = "Add a description or comment about this remote datasource")
 
@@ -794,7 +795,7 @@ class BGIS_OT_reset_overpass_server(Operator):
 
 	bl_idname = "bgis.reset_overpass_server"
 	bl_description = 'Reset default overpass server'
-	bl_label = "Rest"
+	bl_label = "Reset"
 	bl_options = {'INTERNAL'}
 
 	def execute(self, context):

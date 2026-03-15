@@ -82,8 +82,8 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 		items = listPredefCRS,
 		)
 	reprojection: BoolProperty(
-			name="Specifiy raster CRS",
-			description="Specifiy raster CRS if it's different from scene CRS",
+			name="Specify raster CRS",
+			description="Specify raster CRS if it's different from scene CRS",
 			default=False )
 
 	# List of operator properties, the attributes will be assigned

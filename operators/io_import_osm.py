@@ -188,14 +188,14 @@ class OSM_IMPORT():
 			rprj = Reproj(4326, dstCRS)
 		except Exception as e:
 			log.error('Unable to reproject data', exc_info=True)
-			self.report({'ERROR'}, "Unable to reproject data ckeck logs for more infos")
-			return {'FINISHED'}
+			self.report({'ERROR'}, "Unable to reproject data, check logs for more infos")
+			return {'CANCELLED'}
 
 		if self.useElevObj:
 			if not self.objElevLst:
 				log.error('There is no elevation object in the scene to get elevation from')
 				self.report({'ERROR'}, "There is no elevation object in the scene to get elevation from")
-				return {'FINISHED'}
+				return {'CANCELLED'}
 			elevObj = scn.objects[int(self.objElevLst)]
 			rayCaster = DropToGround(scn, elevObj)
 
@@ -259,19 +259,19 @@ class OSM_IMPORT():
 					offset = None
 					if "height" in tags:
 							htag = tags["height"]
-							htag.replace(',', '.')
+							htag = htag.replace(',', '.')
 							try:
 								offset = int(htag)
-							except:
+							except ValueError:
 								try:
 									offset = float(htag)
-								except:
+								except ValueError:
 									for i, c in enumerate(htag):
 										if not c.isdigit():
 											try:
 												offset, unit = float(htag[:i]), htag[i:].strip()
 												#todo : parse unit  25, 25m, 25 ft, etc.
-											except:
+											except ValueError:
 												offset = None
 					elif "building:levels" in tags:
 						try:
@@ -491,7 +491,7 @@ class OSM_IMPORT():
 						#id = int(obj.get('id', -1))
 						try:
 							id = int(obj['id'])
-						except:
+						except (ValueError, KeyError):
 							id = None
 						if id == member.ref:
 							try:
@@ -543,11 +543,11 @@ class IMPORTGIS_OT_osm_file(Operator, OSM_IMPORT):
 
 		if not os.path.exists(self.filepath):
 			self.report({'ERROR'}, "Invalid file")
-			return{'CANCELLED'}
+			return {'CANCELLED'}
 
 		try:
 			bpy.ops.object.mode_set(mode='OBJECT')
-		except:
+		except RuntimeError:
 			pass
 		bpy.ops.object.select_all(action='DESELECT')
 
@@ -580,7 +580,7 @@ class IMPORTGIS_OT_osm_file(Operator, OSM_IMPORT):
 				geoscn.crs = utm.lonlat_to_epsg(lon, lat)
 			except Exception as e:
 				log.error("Cannot set UTM CRS", exc_info=True)
-				self.report({'ERROR'}, "Cannot set UTM CRS, ckeck logs for more infos")
+				self.report({'ERROR'}, "Cannot set UTM CRS, check logs for more infos")
 				return {'CANCELLED'}
 		#Set scene origin georef
 		if not geoscn.hasOriginPrj:
@@ -596,7 +596,7 @@ class IMPORTGIS_OT_osm_file(Operator, OSM_IMPORT):
 		bbox = getBBOX.fromScn(scn)
 		adjust3Dview(context, bbox)
 
-		return{'FINISHED'}
+		return {'FINISHED'}
 
 
 
@@ -673,7 +673,7 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 			result = api.query(query)
 		except Exception as e:
 			log.error("Overpass query failed", exc_info=True)
-			self.report({'ERROR'}, "Overpass query failed, ckeck logs for more infos.")
+			self.report({'ERROR'}, "Overpass query failed, check logs for more infos.")
 			return {'CANCELLED'}
 		else:
 			log.info('Overpass query successful')

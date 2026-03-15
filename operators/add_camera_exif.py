@@ -134,7 +134,7 @@ class CAMERA_OT_geophotos_add(Operator):
                 exif = Tyf.open(filepath)
             except Exception as e:
                 log.error("Unable to open file", exc_info=True)
-                self.report({'ERROR'},"Unable to open file. Checks logs for more infos.")
+                self.report({'ERROR'},"Unable to open file. Check logs for more infos.")
                 return {'CANCELLED'}
 
             #tags = {t.key:exif[t.key] for t in exif.exif.tags() if t.key != 'Unknown' }

@@ -177,9 +177,8 @@ class GeoRef():
 		xres, yres = self.pxSize
 		xrot, yrot = self.rotation
 		wf = (xres, xrot, yrot, yres, xmin, ymax)
-		f = open(path,'w')
-		f.write( '\n'.join(list(map(str, wf))) )
-		f.close()
+		with open(path, 'w') as f:
+			f.write( '\n'.join(list(map(str, wf))) )
 
 	############################################
 	# Dynamic properties

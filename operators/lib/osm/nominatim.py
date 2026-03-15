@@ -9,7 +9,7 @@ from urllib.request import urlopen
 from urllib.request import Request
 from urllib.parse import quote_plus
 
-TIMEOUT = 2
+TIMEOUT = 10
 
 def nominatimQuery(
     query,

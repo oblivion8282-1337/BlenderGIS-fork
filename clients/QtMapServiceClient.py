@@ -49,7 +49,7 @@ def getKmlExtent(kmlFile, crs2):
 		return coordinates
 
 	def namespace(element):
-		m = re.match('\{.*\}', element.tag)
+		m = re.match(r'\{.*\}', element.tag)
 		return m.group(0) if m else ''
 
 	root = etree.parse(kmlFile).getroot()
