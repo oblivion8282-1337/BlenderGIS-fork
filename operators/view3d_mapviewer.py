@@ -64,6 +64,11 @@ _search_result_items = [] #enum items cache (prevent garbage collection)
 _search_history = []
 _search_history_items = [] #enum items cache (prevent garbage collection)
 
+#Last map session config (for resume)
+_last_map_src = None
+_last_map_lay = None
+_last_map_grd = None
+
 #Info overlay data — updated by operator, read by persistent draw handler
 _overlay_zoom = 0
 _overlay_lat = 0.0
@@ -771,6 +776,11 @@ class VIEW3D_OT_map_start(Operator):
 			self.report({'WARNING'}, "View3D not found, cannot run operator")
 			return {'CANCELLED'}
 
+		#If called via shortcut and a previous session exists, resume directly
+		if self.dialog == 'MAP' and _last_map_src is not None:
+			bpy.ops.view3d.map_resume('EXEC_DEFAULT')
+			return {'FINISHED'}
+
 		#Update zoom
 		geoscn = GeoScene(context.scene)
 		if geoscn.hasZoom:
@@ -841,6 +851,11 @@ class VIEW3D_OT_map_start(Operator):
 
 		#Start map viewer operator
 		self.dialog = 'MAP' #reinit dialog type
+		#Save last config for resume
+		global _last_map_src, _last_map_lay, _last_map_grd
+		_last_map_src = self.src
+		_last_map_lay = self.lay
+		_last_map_grd = self.grd
 		bpy.ops.view3d.map_viewer('INVOKE_DEFAULT', srckey=self.src, laykey=self.lay, grdkey=self.grd, recenter=self.recenter)
 
 		return {'FINISHED'}
@@ -1473,11 +1488,136 @@ class VIEW3D_OT_map_search_results(bpy.types.Operator):
 			recenter=False)
 
 
+class VIEW3D_OT_map_goto(bpy.types.Operator):
+	"""Search for a location and open it in the map viewer"""
+
+	bl_idname = "view3d.map_goto"
+	bl_label = "Go to Location"
+	bl_description = 'Search for a place and open it in the map viewer'
+	bl_options = {'INTERNAL'}
+
+	query: StringProperty(name="Location")
+
+	def listHistory(self, context):
+		global _search_history_items
+		_search_history_items = [('NONE', '-- Recent --', '')]
+		for i, q in enumerate(_search_history):
+			_search_history_items.append((str(i), q, ''))
+		return _search_history_items
+
+	history: EnumProperty(
+		name="History",
+		items=listHistory
+	)
+
+	def check(self, context):
+		if self.history != 'NONE':
+			idx = int(self.history)
+			if 0 <= idx < len(_search_history):
+				self.query = _search_history[idx]
+			self.history = 'NONE'
+		return True
+
+	def invoke(self, context, event):
+		return context.window_manager.invoke_props_dialog(self)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, 'query', text='', icon='VIEWZOOM')
+		if _search_history:
+			layout.prop(self, 'history', text="Recent")
+
+	def execute(self, context):
+		if not self.query:
+			self.report({'INFO'}, "Please enter a location")
+			return {'CANCELLED'}
+
+		geoscn = GeoScene(context.scene)
+		prefs = context.preferences.addons[PKG].preferences
+
+		#Query Nominatim
+		try:
+			global _nominatim_results
+			_nominatim_results = nominatimQuery(self.query, referer='bgis', user_agent=USER_AGENT)
+		except Exception as e:
+			log.error('Failed Nominatim query', exc_info=True)
+			_nominatim_results = []
+
+		if not _nominatim_results:
+			self.report({'INFO'}, "No location found")
+			return {'CANCELLED'}
+
+		#Save to search history
+		global _search_history
+		q = self.query.strip()
+		if q:
+			if q in _search_history:
+				_search_history.remove(q)
+			_search_history.insert(0, q)
+			_search_history = _search_history[:10]
+
+		#If no previous map config, need to start basemap first
+		if _last_map_src is None:
+			#Apply first result directly, then let user start basemap
+			result = _nominatim_results[0]
+			lat, lon = float(result['lat']), float(result['lon'])
+			if geoscn.isGeoref:
+				geoscn.updOriginGeo(lon, lat, updObjLoc=prefs.lockObj)
+			else:
+				geoscn.setOriginGeo(lon, lat)
+			if 'boundingbox' in result:
+				bbox = result['boundingbox']
+				lat_extent = abs(float(bbox[1]) - float(bbox[0]))
+				lon_extent = abs(float(bbox[3]) - float(bbox[2]))
+				max_extent = max(lat_extent, lon_extent)
+				if max_extent > 0:
+					zoom = int(math.log2(360 / max_extent))
+					zoom = max(2, min(zoom, 16))
+					geoscn.zoom = zoom
+			self.report({'INFO'}, "Location set. Start Basemap to view the map.")
+			return {'FINISHED'}
+
+		#Show results picker (it will start map viewer after selection)
+		bpy.ops.view3d.map_search_results('INVOKE_DEFAULT',
+			srckey=_last_map_src, laykey=_last_map_lay, grdkey=_last_map_grd)
+		return {'FINISHED'}
+
+
+class VIEW3D_OT_map_resume(bpy.types.Operator):
+	"""Resume the map viewer with the last used settings"""
+
+	bl_idname = "view3d.map_resume"
+	bl_label = "Resume Map"
+	bl_description = 'Resume map viewer with last settings (no dialog)'
+	bl_options = {'INTERNAL'}
+
+	@classmethod
+	def poll(cls, context):
+		return (context.area.type == 'VIEW_3D'
+			and _last_map_src is not None
+			and _last_map_lay is not None
+			and _last_map_grd is not None)
+
+	def execute(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		#check cache folder
+		folder = prefs.cacheFolder
+		if folder == "" or not os.path.exists(folder):
+			self.report({'ERROR'}, "Please define a valid cache folder path in addon's preferences")
+			return {'CANCELLED'}
+		bpy.ops.view3d.map_viewer('INVOKE_DEFAULT',
+			srckey=_last_map_src, laykey=_last_map_lay, grdkey=_last_map_grd,
+			recenter=False)
+		return {'FINISHED'}
+
+
 classes = [
 	VIEW3D_OT_map_start,
 	VIEW3D_OT_map_viewer,
 	VIEW3D_OT_map_search,
-	VIEW3D_OT_map_search_results
+	VIEW3D_OT_map_search_results,
+	VIEW3D_OT_map_goto,
+	VIEW3D_OT_map_resume
 ]
 
 def register():

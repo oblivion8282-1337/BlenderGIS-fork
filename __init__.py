@@ -27,7 +27,7 @@ bl_info = {
 	'deps': '',
 	'version': (2, 2, 14),
 	'blender': (2, 83, 0),
-	'location': 'View3D > Tools > GIS',
+	'location': 'View3D > Sidebar > GIS',
 	'warning': '',
 	'wiki_url': 'https://github.com/domlysz/BlenderGIS/wiki',
 	'tracker_url': 'https://github.com/domlysz/BlenderGIS/issues',
@@ -192,98 +192,147 @@ class BGIS_OT_logs(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-class VIEW3D_MT_menu_gis_import(bpy.types.Menu):
-	bl_label = "Import"
-	def draw(self, context):
-		if IMPORT_SHP:
-			self.layout.operator("importgis.shapefile_file_dialog", icon_value=icons_dict["shp"].icon_id, text='Shapefile (.shp)')
-		if IMPORT_GEORASTER:
-			self.layout.operator("importgis.georaster", icon_value=icons_dict["raster"].icon_id, text="Georeferenced raster (.tif .jpg .jp2 .png)")
-		if IMPORT_OSM:
-			self.layout.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="Open Street Map xml (.osm)")
-		if IMPORT_ASC:
-			self.layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
+####################################
+# N-Panel Sidebar
+####################################
 
-class VIEW3D_MT_menu_gis_export(bpy.types.Menu):
-	bl_label = "Export"
-	def draw(self, context):
-		if EXPORT_SHP:
-			self.layout.operator('exportgis.shapefile', text="Shapefile (.shp)", icon_value=icons_dict["shp"].icon_id)
+class VIEW3D_PT_gis_webgeodata(bpy.types.Panel):
+	bl_label = "Web Geodata"
+	bl_idname = "VIEW3D_PT_gis_webgeodata"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 0
 
-class VIEW3D_MT_menu_gis_webgeodata(bpy.types.Menu):
-	bl_label = "Web geodata"
-	def draw(self, context):
-		if BASEMAPS:
-			self.layout.operator("view3d.map_start", icon_value=icons_dict["layers"].icon_id)
-		if IMPORT_OSM:
-			self.layout.operator("importgis.osm_query", icon_value=icons_dict["osm"].icon_id)
-		if GET_DEM:
-			self.layout.operator("importgis.dem_query", icon_value=icons_dict["raster"].icon_id)
-
-class VIEW3D_MT_menu_gis_camera(bpy.types.Menu):
-	bl_label = "Camera"
-	def draw(self, context):
-		if CAM_GEOREF:
-			self.layout.operator("camera.georender", icon_value=icons_dict["georefCam"].icon_id, text='Georender')
-		if CAM_GEOPHOTO:
-			self.layout.operator("camera.geophotos", icon_value=icons_dict["exifCam"].icon_id, text='Geophotos')
-			self.layout.operator("camera.geophotos_setactive", icon='FILE_REFRESH')
-
-class VIEW3D_MT_menu_gis_mesh(bpy.types.Menu):
-	bl_label = "Mesh"
-	def draw(self, context):
-		if DELAUNAY:
-			self.layout.operator("tesselation.delaunay", icon_value=icons_dict["delaunay"].icon_id, text='Delaunay')
-			self.layout.operator("tesselation.voronoi", icon_value=icons_dict["voronoi"].icon_id, text='Voronoi')
-		if EARTH_SPHERE:
-			self.layout.operator("earth.sphere", icon="WORLD", text='lonlat to sphere')
-			#self.layout.operator("earth.curvature", icon="SPHERECURVE", text='Earth curvature correction')
-			self.layout.operator("earth.curvature", icon_value=icons_dict["curve"].icon_id, text='Earth curvature correction')
-
-class VIEW3D_MT_menu_gis_object(bpy.types.Menu):
-	bl_label = "Object"
-	def draw(self, context):
-		if DROP:
-			self.layout.operator("object.drop", icon_value=icons_dict["drop"].icon_id, text='Drop')
-
-class VIEW3D_MT_menu_gis_nodes(bpy.types.Menu):
-	bl_label = "Nodes"
-	def draw(self, context):
-		if TERRAIN_NODES:
-			self.layout.operator("analysis.nodes", icon_value=icons_dict["terrain"].icon_id, text='Terrain analysis')
-
-class VIEW3D_MT_menu_gis(bpy.types.Menu):
-	bl_label = "GIS"
-	# Set the menu operators and draw functions
 	def draw(self, context):
 		layout = self.layout
-		layout.operator("bgis.pref_show", icon='PREFERENCES')
-		layout.separator()
-		layout.menu('VIEW3D_MT_menu_gis_webgeodata', icon="URL")
-		layout.menu('VIEW3D_MT_menu_gis_import', icon='IMPORT')
-		layout.menu('VIEW3D_MT_menu_gis_export', icon='EXPORT')
-		layout.menu('VIEW3D_MT_menu_gis_camera', icon='CAMERA_DATA')
-		layout.menu('VIEW3D_MT_menu_gis_mesh', icon='MESH_DATA')
-		layout.menu('VIEW3D_MT_menu_gis_object', icon='CUBE')
-		layout.menu('VIEW3D_MT_menu_gis_nodes', icon='NODETREE')
-		layout.separator()
-		layout.operator("bgis.logs", icon='TEXT')
+		if BASEMAPS:
+			layout.operator("view3d.map_start", icon_value=icons_dict["layers"].icon_id)
+			row = layout.row()
+			row.operator("view3d.map_resume", icon='LOOP_FORWARDS', text="Resume Map")
+			row.enabled = bpy.ops.view3d.map_resume.poll() if hasattr(bpy.ops.view3d, 'map_resume') else False
+			layout.separator()
+			layout.operator("view3d.map_goto", icon='VIEWZOOM', text="Go to Location")
+		if IMPORT_OSM:
+			layout.operator("importgis.osm_query", icon_value=icons_dict["osm"].icon_id)
+		if GET_DEM:
+			layout.operator("importgis.dem_query", icon_value=icons_dict["raster"].icon_id)
 
-menus = [
-VIEW3D_MT_menu_gis,
-VIEW3D_MT_menu_gis_webgeodata,
-VIEW3D_MT_menu_gis_import,
-VIEW3D_MT_menu_gis_export,
-VIEW3D_MT_menu_gis_camera,
-VIEW3D_MT_menu_gis_mesh,
-VIEW3D_MT_menu_gis_object,
-VIEW3D_MT_menu_gis_nodes
+class VIEW3D_PT_gis_import(bpy.types.Panel):
+	bl_label = "Import"
+	bl_idname = "VIEW3D_PT_gis_import"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 1
+
+	def draw(self, context):
+		layout = self.layout
+		if IMPORT_SHP:
+			layout.operator("importgis.shapefile_file_dialog", icon_value=icons_dict["shp"].icon_id, text='Shapefile (.shp)')
+		if IMPORT_GEORASTER:
+			layout.operator("importgis.georaster", icon_value=icons_dict["raster"].icon_id, text="Georeferenced raster")
+		if IMPORT_OSM:
+			layout.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="OpenStreetMap (.osm)")
+		if IMPORT_ASC:
+			layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
+
+class VIEW3D_PT_gis_export(bpy.types.Panel):
+	bl_label = "Export"
+	bl_idname = "VIEW3D_PT_gis_export"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 2
+
+	def draw(self, context):
+		layout = self.layout
+		if EXPORT_SHP:
+			layout.operator('exportgis.shapefile', text="Shapefile (.shp)", icon_value=icons_dict["shp"].icon_id)
+
+class VIEW3D_PT_gis_camera(bpy.types.Panel):
+	bl_label = "Camera"
+	bl_idname = "VIEW3D_PT_gis_camera"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 3
+
+	def draw(self, context):
+		layout = self.layout
+		if CAM_GEOREF:
+			layout.operator("camera.georender", icon_value=icons_dict["georefCam"].icon_id, text='Georender')
+		if CAM_GEOPHOTO:
+			layout.operator("camera.geophotos", icon_value=icons_dict["exifCam"].icon_id, text='Geophotos')
+			layout.operator("camera.geophotos_setactive", icon='FILE_REFRESH')
+
+class VIEW3D_PT_gis_mesh(bpy.types.Panel):
+	bl_label = "Mesh"
+	bl_idname = "VIEW3D_PT_gis_mesh"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 4
+
+	def draw(self, context):
+		layout = self.layout
+		if DELAUNAY:
+			layout.operator("tesselation.delaunay", icon_value=icons_dict["delaunay"].icon_id, text='Delaunay')
+			layout.operator("tesselation.voronoi", icon_value=icons_dict["voronoi"].icon_id, text='Voronoi')
+		if EARTH_SPHERE:
+			layout.operator("earth.sphere", icon="WORLD", text='lonlat to sphere')
+			layout.operator("earth.curvature", icon_value=icons_dict["curve"].icon_id, text='Earth curvature correction')
+
+class VIEW3D_PT_gis_object(bpy.types.Panel):
+	bl_label = "Object"
+	bl_idname = "VIEW3D_PT_gis_object"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 5
+
+	def draw(self, context):
+		layout = self.layout
+		if DROP:
+			layout.operator("object.drop", icon_value=icons_dict["drop"].icon_id, text='Drop')
+
+class VIEW3D_PT_gis_nodes(bpy.types.Panel):
+	bl_label = "Nodes"
+	bl_idname = "VIEW3D_PT_gis_nodes"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 6
+
+	def draw(self, context):
+		layout = self.layout
+		if TERRAIN_NODES:
+			layout.operator("analysis.nodes", icon_value=icons_dict["terrain"].icon_id, text='Terrain analysis')
+
+class VIEW3D_PT_gis_settings(bpy.types.Panel):
+	bl_label = "Settings"
+	bl_idname = "VIEW3D_PT_gis_settings"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 7
+	bl_options = {'DEFAULT_CLOSED'}
+
+	def draw(self, context):
+		layout = self.layout
+		layout.operator("bgis.pref_show", icon='PREFERENCES', text='Preferences')
+		layout.operator("bgis.logs", icon='TEXT', text='Show Logs')
+
+panels = [
+	VIEW3D_PT_gis_webgeodata,
+	VIEW3D_PT_gis_import,
+	VIEW3D_PT_gis_export,
+	VIEW3D_PT_gis_camera,
+	VIEW3D_PT_gis_mesh,
+	VIEW3D_PT_gis_object,
+	VIEW3D_PT_gis_nodes,
+	VIEW3D_PT_gis_settings,
 ]
-
-
-def add_gis_menu(self, context):
-	if context.mode == 'OBJECT':
-		self.layout.menu('VIEW3D_MT_menu_gis')
 
 
 def register():
@@ -299,13 +348,13 @@ def register():
 	prefs.register()
 	geoscene.register()
 
-	for menu in menus:
+	for panel in panels:
 		try:
-			bpy.utils.register_class(menu)
+			bpy.utils.register_class(panel)
 		except ValueError as e:
-			logger.warning('{} is already registered, now unregister and retry... '.format(menu))
-			bpy.utils.unregister_class(menu)
-			bpy.utils.register_class(menu)
+			logger.warning('{} is already registered, now unregister and retry... '.format(panel))
+			bpy.utils.unregister_class(panel)
+			bpy.utils.register_class(panel)
 
 	bpy.utils.register_class(BGIS_OT_logs)
 
@@ -338,8 +387,7 @@ def register():
 	if EARTH_SPHERE:
 		mesh_earth_sphere.register()
 
-	#menus
-	bpy.types.VIEW3D_MT_editor_menus.append(add_gis_menu)
+	#N-panel is registered via panel classes, no header menu needed
 
 	#shortcuts
 	if not bpy.app.background: #no ui when running as background
@@ -372,10 +420,8 @@ def unregister():
 				if 'view3d.map_start' in km.keymap_items:
 					kmi = km.keymap_items.remove(km.keymap_items['view3d.map_start'])
 
-	bpy.types.VIEW3D_MT_editor_menus.remove(add_gis_menu)
-
-	for menu in menus:
-		bpy.utils.unregister_class(menu)
+	for panel in panels:
+		bpy.utils.unregister_class(panel)
 
 	bpy.utils.unregister_class(BGIS_OT_logs)
 
