@@ -153,8 +153,9 @@ class TileMatrix():
 	def getResList(self):
 		if hasattr(self, 'resolutions'):
 			return self.resolutions
-		else:
-			return [self.initRes / self.resFactor**zoom for zoom in range(self.nbLevels)]
+		if not hasattr(self, '_computed_resolutions'):
+			self._computed_resolutions = [self.initRes / self.resFactor**zoom for zoom in range(self.nbLevels)]
+		return self._computed_resolutions
 
 	def getRes(self, zoom):
 		"""Resolution (meters/pixel) for given zoom level (measured at Equator)"""

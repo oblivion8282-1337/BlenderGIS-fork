@@ -88,15 +88,19 @@ def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'rela
 
 
 ########################
+_join_buffer = None
+
 def joinBmesh(src_bm, dest_bm):
 	'''
 	Hack to join a bmesh to another
 	TODO: replace this function by bmesh.ops.duplicate when 'dest' argument will be implemented
 	'''
-	buff = bpy.data.meshes.new(".temp")
-	src_bm.to_mesh(buff)
-	dest_bm.from_mesh(buff)
-	bpy.data.meshes.remove(buff)
+	global _join_buffer
+	if _join_buffer is None or not _join_buffer.is_valid:
+		_join_buffer = bpy.data.meshes.new(".temp")
+	src_bm.to_mesh(_join_buffer)
+	dest_bm.from_mesh(_join_buffer)
+	_join_buffer.clear_geometry()
 
 
 

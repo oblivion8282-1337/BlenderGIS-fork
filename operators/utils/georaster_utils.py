@@ -91,7 +91,7 @@ def exportAsMesh(georaster, dx=0, dy=0, step=1, buildFaces=True, subset=False, r
 	#Build the mesh (Note : avoid using bmesh because it's very slow with large mesh, use from_pydata instead)
 	verts = []
 	faces = []
-	nodata = []
+	nodata = set()
 	idxMap = {}
 	for py in range(0, h, step):
 		for px in range(0, w, step):
@@ -115,7 +115,7 @@ def exportAsMesh(georaster, dx=0, dy=0, step=1, buildFaces=True, subset=False, r
 
 			#Filter nodata
 			if z == georaster.noData:
-				nodata.append(v1)
+				nodata.add(v1)
 			else:
 				verts.append((x, y, z))
 				idxMap[v1] = len(verts) - 1
@@ -126,7 +126,7 @@ def exportAsMesh(georaster, dx=0, dy=0, step=1, buildFaces=True, subset=False, r
 					v3 = v2 - w * step #topleft
 					v4 = v3 + step #topright
 					f = [v4, v3, v2, v1] #anticlockwise --> face up
-					if not any(v in f for v in nodata): #TODO too slow ?
+					if not any(v in nodata for v in f):
 						f = [idxMap[v] for v in f]
 						faces.append(f)
 
