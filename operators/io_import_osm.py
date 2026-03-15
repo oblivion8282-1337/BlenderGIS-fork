@@ -41,6 +41,20 @@ OSMTAGS = []
 closedWaysArePolygons = ['aeroway', 'amenity', 'boundary', 'building', 'craft', 'geological', 'historic', 'landuse', 'leisure', 'military', 'natural', 'office', 'place', 'shop' , 'sport', 'tourism']
 closedWaysAreExtruded = ['building']
 
+#Street width by highway type (meters)
+HIGHWAY_WIDTHS = {
+	'motorway': 12, 'motorway_link': 8,
+	'trunk': 10, 'trunk_link': 7,
+	'primary': 8, 'primary_link': 6,
+	'secondary': 7, 'secondary_link': 5,
+	'tertiary': 6, 'tertiary_link': 5,
+	'residential': 5, 'living_street': 4,
+	'service': 3, 'unclassified': 5,
+	'pedestrian': 3, 'footway': 2, 'path': 1.5,
+	'cycleway': 2, 'track': 3, 'steps': 2,
+}
+DEFAULT_STREET_WIDTH = 4
+
 
 def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'relation'], format='json'):
 
@@ -159,6 +173,91 @@ def _apply_building_geonodes(obj):
 	"""Add the building extrusion Geometry Nodes modifier to an object."""
 	group = _get_or_create_building_geonodes()
 	mod = obj.modifiers.new('Building Extrusion', type='NODES')
+	mod.node_group = group
+
+
+def _get_or_create_street_geonodes():
+	"""Create a Geometry Nodes group for street width from 'width' attribute."""
+	name = 'OSM Street Width'
+	if name in bpy.data.node_groups:
+		return bpy.data.node_groups[name]
+
+	group = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+
+	# Interface sockets
+	group.interface.new_socket(name='Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+	s_mult = group.interface.new_socket(name='Width Multiplier', in_out='INPUT', socket_type='NodeSocketFloat')
+	s_mult.default_value = 1.0
+	s_mult.min_value = 0.0
+	s_mult.max_value = 10.0
+	s_merge = group.interface.new_socket(name='Merge Distance', in_out='INPUT', socket_type='NodeSocketFloat')
+	s_merge.default_value = 0.0
+	s_merge.min_value = 0.0
+	s_merge.max_value = 1.0
+	group.interface.new_socket(name='Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+	nodes = group.nodes
+	links = group.links
+
+	# Group Input / Output
+	n_in = nodes.new('NodeGroupInput')
+	n_in.location = (-700, 0)
+	n_out = nodes.new('NodeGroupOutput')
+	n_out.location = (500, 0)
+
+	# Named Attribute → read "width" per vertex
+	n_attr = nodes.new('GeometryNodeInputNamedAttribute')
+	n_attr.data_type = 'FLOAT'
+	n_attr.inputs['Name'].default_value = 'width'
+	n_attr.location = (-700, -200)
+
+	# width * multiplier * 0.5 (profile spans -1 to +1 = 2 units)
+	n_mult = nodes.new('ShaderNodeMath')
+	n_mult.operation = 'MULTIPLY'
+	n_mult.location = (-450, -200)
+	links.new(n_attr.outputs[0], n_mult.inputs[0])
+	links.new(n_in.outputs[1], n_mult.inputs[1])  # Width Multiplier
+
+	n_half = nodes.new('ShaderNodeMath')
+	n_half.operation = 'MULTIPLY'
+	n_half.inputs[1].default_value = 0.5
+	n_half.location = (-250, -200)
+	links.new(n_mult.outputs[0], n_half.inputs[0])
+
+	# Mesh to Curve
+	n_m2c = nodes.new('GeometryNodeMeshToCurve')
+	n_m2c.location = (-300, 0)
+	links.new(n_in.outputs[0], n_m2c.inputs[0])  # Geometry
+
+	# Profile: line from (-1, 0, 0) to (1, 0, 0)
+	n_line = nodes.new('GeometryNodeCurvePrimitiveLine')
+	n_line.location = (-100, -300)
+	n_line.inputs['Start'].default_value = (-1.0, 0.0, 0.0)
+	n_line.inputs['End'].default_value = (1.0, 0.0, 0.0)
+
+	# Curve to Mesh — use Scale input for width
+	n_c2m = nodes.new('GeometryNodeCurveToMesh')
+	n_c2m.location = (50, 0)
+	links.new(n_m2c.outputs[0], n_c2m.inputs[0])   # Curve
+	links.new(n_line.outputs[0], n_c2m.inputs[1])   # Profile Curve
+	links.new(n_half.outputs[0], n_c2m.inputs[2])   # Scale
+
+	# Merge by Distance
+	n_merge = nodes.new('GeometryNodeMergeByDistance')
+	n_merge.location = (300, 0)
+	links.new(n_c2m.outputs[0], n_merge.inputs[0])  # Geometry
+	links.new(n_in.outputs[2], n_merge.inputs[2])    # Merge Distance
+
+	# Output
+	links.new(n_merge.outputs[0], n_out.inputs[0])
+
+	return group
+
+
+def _apply_street_geonodes(obj):
+	"""Add the street width Geometry Nodes modifier to an object."""
+	group = _get_or_create_street_geonodes()
+	mod = obj.modifiers.new('Street Width', type='NODES')
 	mod.node_group = group
 
 
@@ -322,10 +421,13 @@ class OSM_IMPORT():
 			#>using an intermediate bmesh object allows some extra operation like extrusion
 			bm = bmesh.new()
 
-			#Pre-create height layer before adding faces (adding layers invalidates element refs)
+			#Pre-create attribute layers before adding geometry (adding layers invalidates element refs)
 			is_building = closed and self.buildingsExtrusion and any(tag in closedWaysAreExtruded for tag in tags)
+			is_street = not closed and 'highway' in tags
 			if is_building:
 				height_layer = bm.faces.layers.float.new('height')
+			if is_street:
+				width_layer = bm.verts.layers.float.new('width')
 
 			if len(pts) == 1:
 				verts = [bm.verts.new(pt) for pt in pts]
@@ -377,6 +479,18 @@ class OSM_IMPORT():
 				verts = [bm.verts.new(pt) for pt in pts]
 				for i in range(len(pts)-1):
 					edge = bm.edges.new( [verts[i], verts[i+1] ])
+				#Store street width as vertex attribute for Geometry Nodes
+				if is_street:
+					hw_type = tags.get('highway', '')
+					street_w = HIGHWAY_WIDTHS.get(hw_type, DEFAULT_STREET_WIDTH)
+					#OSM width tag overrides default
+					if 'width' in tags:
+						try:
+							street_w = float(tags['width'].replace('m','').replace(',','.').strip())
+						except ValueError:
+							pass
+					for v in verts:
+						v[width_layer] = street_w
 
 
 			if self.separate:
@@ -390,9 +504,11 @@ class OSM_IMPORT():
 
 				obj = bpy.data.objects.new(name, mesh)
 
-				#Add Geometry Nodes extrusion for building objects
+				#Add Geometry Nodes modifiers
 				if self.buildingsExtrusion and any(tag in closedWaysAreExtruded for tag in tags):
 					_apply_building_geonodes(obj)
+				if 'highway' in tags:
+					_apply_street_geonodes(obj)
 
 				#Assign tags to custom props
 				obj['id'] = str(id) #cast to str to avoid overflow error "Python int too large to convert to C int"
@@ -531,9 +647,11 @@ class OSM_IMPORT():
 				scn.collection.objects.link(obj)
 				obj.select_set(True)
 
-				#Add Geometry Nodes extrusion for building meshes
+				#Add Geometry Nodes modifiers
 				if self.buildingsExtrusion and 'building' in name.lower():
 					_apply_building_geonodes(obj)
+				if 'highway' in name.lower():
+					_apply_street_geonodes(obj)
 
 				vgroups = vgroupsObj.get(name, None)
 				if vgroups is not None:
