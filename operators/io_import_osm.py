@@ -104,7 +104,9 @@ def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'rela
 ########################
 
 def _get_or_create_building_geonodes():
-	"""Create a Geometry Nodes group for building extrusion from 'height' attribute."""
+	"""Create a Geometry Nodes group for building extrusion from 'height' attribute.
+	Stores a per-building random ID before extrusion (for consistent shader variation),
+	and assigns material index 1 to extruded side faces."""
 	name = 'OSM Building Extrusion'
 	if name in bpy.data.node_groups:
 		return bpy.data.node_groups[name]
@@ -126,7 +128,21 @@ def _get_or_create_building_geonodes():
 	n_in = nodes.new('NodeGroupInput')
 	n_in.location = (-600, 0)
 	n_out = nodes.new('NodeGroupOutput')
-	n_out.location = (400, 0)
+	n_out.location = (600, 0)
+
+	# --- Store per-building random ID (before extrusion, each face = one building) ---
+	n_random = nodes.new('FunctionNodeRandomValue')
+	n_random.data_type = 'FLOAT'
+	n_random.location = (-450, -350)
+	n_random.inputs[8].default_value = 42  # Seed
+
+	n_store_id = nodes.new('GeometryNodeStoreNamedAttribute')
+	n_store_id.data_type = 'FLOAT'
+	n_store_id.domain = 'FACE'
+	n_store_id.location = (-250, 0)
+	n_store_id.inputs[2].default_value = "building_id"  # Name
+	links.new(n_in.outputs['Geometry'], n_store_id.inputs[0])  # Geometry
+	links.new(n_random.outputs[1], n_store_id.inputs[3])  # Value (float output)
 
 	# Named Attribute → read "height" per face
 	n_attr = nodes.new('GeometryNodeInputNamedAttribute')
@@ -137,43 +153,220 @@ def _get_or_create_building_geonodes():
 	# Multiply height by multiplier
 	n_mult = nodes.new('ShaderNodeMath')
 	n_mult.operation = 'MULTIPLY'
-	n_mult.location = (-300, -150)
+	n_mult.location = (-100, -150)
 	links.new(n_attr.outputs['Attribute'], n_mult.inputs[0])
 	links.new(n_in.outputs['Height Multiplier'], n_mult.inputs[1])
 
 	# Combine XYZ → offset vector (0, 0, height)
 	n_xyz = nodes.new('ShaderNodeCombineXYZ')
-	n_xyz.location = (-100, -150)
+	n_xyz.location = (50, -150)
 	links.new(n_mult.outputs[0], n_xyz.inputs['Z'])
 
 	# Selection: only extrude faces where height > 0
 	n_gt = nodes.new('FunctionNodeCompare')
 	n_gt.data_type = 'FLOAT'
 	n_gt.operation = 'GREATER_THAN'
-	n_gt.location = (-300, -300)
+	n_gt.location = (-100, -300)
 	links.new(n_attr.outputs['Attribute'], n_gt.inputs['A'])
 	n_gt.inputs['B'].default_value = 0.0
 
 	# Extrude Mesh (Individual Faces)
 	n_ext = nodes.new('GeometryNodeExtrudeMesh')
 	n_ext.mode = 'FACES'
-	n_ext.location = (100, 0)
+	n_ext.location = (200, 0)
 	n_ext.inputs['Individual'].default_value = True
-	links.new(n_in.outputs['Geometry'], n_ext.inputs['Mesh'])
+	links.new(n_store_id.outputs[0], n_ext.inputs['Mesh'])  # From Store Named Attribute
 	links.new(n_gt.outputs['Result'], n_ext.inputs['Selection'])
 	links.new(n_xyz.outputs['Vector'], n_ext.inputs['Offset'])
 
+	# Set Material Index = 1 on side faces
+	n_setmat = nodes.new('GeometryNodeSetMaterialIndex')
+	n_setmat.location = (400, 0)
+	links.new(n_ext.outputs['Mesh'], n_setmat.inputs['Geometry'])
+	links.new(n_ext.outputs['Side'], n_setmat.inputs['Selection'])
+	n_setmat.inputs['Material Index'].default_value = 1
+
 	# Output
-	links.new(n_ext.outputs['Mesh'], n_out.inputs['Geometry'])
+	links.new(n_setmat.outputs['Geometry'], n_out.inputs['Geometry'])
 
 	return group
 
 
+def _get_or_create_rooftop_material():
+	"""Create a simple default rooftop material (slot 0).
+	Can be replaced later with satellite texture projection."""
+	name = 'OSM_Rooftop_Satellite'
+	if name in bpy.data.materials:
+		return bpy.data.materials[name]
+
+	mat = bpy.data.materials.new(name)
+	mat.use_nodes = True
+	tree = mat.node_tree
+	bsdf = tree.nodes['Principled BSDF']
+	bsdf.inputs['Base Color'].default_value = (0.5, 0.5, 0.5, 1.0)
+	bsdf.inputs['Roughness'].default_value = 0.9
+	return mat
+
+
+def _get_or_create_facade_material():
+	"""Create the procedural facade shader (slot 1) with tangent-projected window grid.
+	Uses True Normal for correct projection on all wall orientations,
+	and FLOORED_MODULO to handle negative coordinate values."""
+	name = 'OSM_Facade_Procedural'
+	if name in bpy.data.materials:
+		return bpy.data.materials[name]
+
+	mat = bpy.data.materials.new(name)
+	mat.use_nodes = True
+	tree = mat.node_tree
+	tree.nodes.clear()
+
+	# --- Core nodes ---
+	n_output = tree.nodes.new('ShaderNodeOutputMaterial')
+	n_output.location = (1100, 0)
+
+	n_bsdf = tree.nodes.new('ShaderNodeBsdfPrincipled')
+	n_bsdf.location = (900, 0)
+	tree.links.new(n_bsdf.outputs['BSDF'], n_output.inputs['Surface'])
+
+	# Geometry → True Normal
+	n_geom = tree.nodes.new('ShaderNodeNewGeometry')
+	n_geom.location = (-800, 200)
+
+	n_sep_normal = tree.nodes.new('ShaderNodeSeparateXYZ')
+	n_sep_normal.location = (-600, 200)
+	tree.links.new(n_geom.outputs['True Normal'], n_sep_normal.inputs['Vector'])
+
+	# Texture Coordinate → Object position
+	n_texcoord = tree.nodes.new('ShaderNodeTexCoord')
+	n_texcoord.location = (-800, -100)
+
+	n_sep_pos = tree.nodes.new('ShaderNodeSeparateXYZ')
+	n_sep_pos.location = (-600, -100)
+	tree.links.new(n_texcoord.outputs['Object'], n_sep_pos.inputs['Vector'])
+
+	# --- Tangent projection: h = Y*nx - X*ny ---
+	n_y_nx = tree.nodes.new('ShaderNodeMath')
+	n_y_nx.operation = 'MULTIPLY'
+	n_y_nx.location = (-400, 100)
+	tree.links.new(n_sep_pos.outputs['Y'], n_y_nx.inputs[0])
+	tree.links.new(n_sep_normal.outputs['X'], n_y_nx.inputs[1])
+
+	n_x_ny = tree.nodes.new('ShaderNodeMath')
+	n_x_ny.operation = 'MULTIPLY'
+	n_x_ny.location = (-400, -50)
+	tree.links.new(n_sep_pos.outputs['X'], n_x_ny.inputs[0])
+	tree.links.new(n_sep_normal.outputs['Y'], n_x_ny.inputs[1])
+
+	n_h = tree.nodes.new('ShaderNodeMath')
+	n_h.operation = 'SUBTRACT'
+	n_h.location = (-200, 50)
+	tree.links.new(n_y_nx.outputs[0], n_h.inputs[0])
+	tree.links.new(n_x_ny.outputs[0], n_h.inputs[1])
+
+	# --- Horizontal window grid: h_frac = FLOORED_MODULO(h, 2.5) / 2.5 ---
+	n_h_mod = tree.nodes.new('ShaderNodeMath')
+	n_h_mod.operation = 'FLOORED_MODULO'
+	n_h_mod.location = (-50, 100)
+	n_h_mod.inputs[1].default_value = 2.5
+	tree.links.new(n_h.outputs[0], n_h_mod.inputs[0])
+
+	n_h_frac = tree.nodes.new('ShaderNodeMath')
+	n_h_frac.operation = 'DIVIDE'
+	n_h_frac.location = (100, 100)
+	n_h_frac.inputs[1].default_value = 2.5
+	tree.links.new(n_h_mod.outputs[0], n_h_frac.inputs[0])
+
+	# --- Vertical window grid: z_frac = FLOORED_MODULO(Z, 3.0) / 3.0 ---
+	n_z_mod = tree.nodes.new('ShaderNodeMath')
+	n_z_mod.operation = 'FLOORED_MODULO'
+	n_z_mod.location = (-50, -100)
+	n_z_mod.inputs[1].default_value = 3.0
+	tree.links.new(n_sep_pos.outputs['Z'], n_z_mod.inputs[0])
+
+	n_z_frac = tree.nodes.new('ShaderNodeMath')
+	n_z_frac.operation = 'DIVIDE'
+	n_z_frac.location = (100, -100)
+	n_z_frac.inputs[1].default_value = 3.0
+	tree.links.new(n_z_mod.outputs[0], n_z_frac.inputs[0])
+
+	# --- Window mask: horizontal (0.15 .. 0.85) × vertical (0.1 .. 0.9) ---
+	n_h_gt = tree.nodes.new('ShaderNodeMath')
+	n_h_gt.operation = 'GREATER_THAN'
+	n_h_gt.location = (250, 150)
+	n_h_gt.inputs[1].default_value = 0.15
+	tree.links.new(n_h_frac.outputs[0], n_h_gt.inputs[0])
+
+	n_h_lt = tree.nodes.new('ShaderNodeMath')
+	n_h_lt.operation = 'LESS_THAN'
+	n_h_lt.location = (250, 50)
+	n_h_lt.inputs[1].default_value = 0.85
+	tree.links.new(n_h_frac.outputs[0], n_h_lt.inputs[0])
+
+	n_h_mask = tree.nodes.new('ShaderNodeMath')
+	n_h_mask.operation = 'MULTIPLY'
+	n_h_mask.location = (400, 100)
+	tree.links.new(n_h_gt.outputs[0], n_h_mask.inputs[0])
+	tree.links.new(n_h_lt.outputs[0], n_h_mask.inputs[1])
+
+	n_z_gt = tree.nodes.new('ShaderNodeMath')
+	n_z_gt.operation = 'GREATER_THAN'
+	n_z_gt.location = (250, -50)
+	n_z_gt.inputs[1].default_value = 0.1
+	tree.links.new(n_z_frac.outputs[0], n_z_gt.inputs[0])
+
+	n_z_lt = tree.nodes.new('ShaderNodeMath')
+	n_z_lt.operation = 'LESS_THAN'
+	n_z_lt.location = (250, -150)
+	n_z_lt.inputs[1].default_value = 0.9
+	tree.links.new(n_z_frac.outputs[0], n_z_lt.inputs[0])
+
+	n_z_mask = tree.nodes.new('ShaderNodeMath')
+	n_z_mask.operation = 'MULTIPLY'
+	n_z_mask.location = (400, -100)
+	tree.links.new(n_z_gt.outputs[0], n_z_mask.inputs[0])
+	tree.links.new(n_z_lt.outputs[0], n_z_mask.inputs[1])
+
+	n_window = tree.nodes.new('ShaderNodeMath')
+	n_window.operation = 'MULTIPLY'
+	n_window.location = (550, 0)
+	tree.links.new(n_h_mask.outputs[0], n_window.inputs[0])
+	tree.links.new(n_z_mask.outputs[0], n_window.inputs[1])
+
+	# --- Output: wall/window color mix ---
+	n_mix_color = tree.nodes.new('ShaderNodeMix')
+	n_mix_color.data_type = 'RGBA'
+	n_mix_color.location = (700, 100)
+	n_mix_color.inputs['A'].default_value = (0.75, 0.70, 0.62, 1.0)  # Wall color
+	n_mix_color.inputs['B'].default_value = (0.05, 0.07, 0.12, 1.0)  # Window color
+	tree.links.new(n_window.outputs[0], n_mix_color.inputs['Factor'])
+	tree.links.new(n_mix_color.outputs['Result'], n_bsdf.inputs['Base Color'])
+
+	# Roughness: wall=0.8, window=0.1
+	n_mix_rough = tree.nodes.new('ShaderNodeMix')
+	n_mix_rough.data_type = 'FLOAT'
+	n_mix_rough.location = (700, -100)
+	n_mix_rough.inputs['A'].default_value = 0.8
+	n_mix_rough.inputs['B'].default_value = 0.1
+	tree.links.new(n_window.outputs[0], n_mix_rough.inputs['Factor'])
+	tree.links.new(n_mix_rough.outputs['Result'], n_bsdf.inputs['Roughness'])
+
+	return mat
+
+
 def _apply_building_geonodes(obj):
-	"""Add the building extrusion Geometry Nodes modifier to an object."""
+	"""Add the building extrusion Geometry Nodes modifier and materials to an object."""
 	group = _get_or_create_building_geonodes()
 	mod = obj.modifiers.new('Building Extrusion', type='NODES')
 	mod.node_group = group
+
+	# Assign materials: slot 0 = rooftop, slot 1 = facade
+	mat_roof = _get_or_create_rooftop_material()
+	mat_facade = _get_or_create_facade_material()
+	if mat_roof.name not in [s.material.name for s in obj.material_slots if s.material]:
+		obj.data.materials.append(mat_roof)
+	if mat_facade.name not in [s.material.name for s in obj.material_slots if s.material]:
+		obj.data.materials.append(mat_facade)
 
 
 def _get_or_create_street_geonodes():
