@@ -408,7 +408,7 @@ class GEOSCENE_OT_coords_viewer(Operator):
 
 class GEOSCENE_OT_set_crs(Operator):
 	'''
-	use the enum of predefinites crs defined in addon prefs
+	use the enum of predefined crs defined in addon prefs
 	to select and switch scene crs definition
 	'''
 
@@ -425,8 +425,8 @@ class GEOSCENE_OT_set_crs(Operator):
 		return PredefCRS.getEnumItems()
 
 	crsEnum = EnumProperty(
-		name = "Predefinate CRS",
-		description = "Choose predefinite Coordinate Reference System",
+		name = "Predefined CRS",
+		description = "Choose predefined Coordinate Reference System",
 		items = listPredefCRS
 		)
 	"""

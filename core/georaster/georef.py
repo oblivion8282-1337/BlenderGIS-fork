@@ -38,7 +38,7 @@ class GeoRef():
 		pxSize : dimension of a pixel in map units (x scale, y scale) tuple. y is always negative
 		origin : upper left geo coords of pixel center, (x, y) tuple
 		pxCenter : set it to True is the origin anchor point is located at pixel center
-			or False if it's lolcated at pixel corner
+			or False if it's located at pixel corner
 		rotation : rotation terms (xrot, yrot) <--> (yskew, xskew)
 		subBoxGeo : a BBOX object that define the working extent (subdataset) in geographic coordinate space
 		'''

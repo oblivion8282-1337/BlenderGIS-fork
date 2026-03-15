@@ -135,7 +135,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 	#
 	fillNodata: BoolProperty(
 			name="Fill nodata values",
-			description="Interpolate existing nodata values to get an usuable displacement texture",
+			description="Interpolate existing nodata values to get an usable displacement texture",
 			default=False
 			)
 	#

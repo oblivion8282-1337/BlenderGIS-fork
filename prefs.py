@@ -103,7 +103,7 @@ class BGIS_PREFS(AddonPreferences):
 
 	predefCrs: EnumProperty(
 		name = "Predefinate CRS",
-		description = "Choose predefinite Coordinate Reference System",
+		description = "Choose predefined Coordinate Reference System",
 		#default = 1, #possible only since Blender 2.90
 		items = listPredefCRS
 		)
@@ -197,7 +197,7 @@ class BGIS_PREFS(AddonPreferences):
 	resamplAlg: EnumProperty(
 		name = "Resampling method",
 		description = "Choose GDAL's resampling method used for reprojection",
-		items = [ ('NN', 'Nearest Neighboor', ''), ('BL', 'Bilinear', ''), ('CB', 'Cubic', ''), ('CBS', 'Cubic Spline', ''), ('LCZ', 'Lanczos', '') ]
+		items = [ ('NN', 'Nearest Neighbor', ''), ('BL', 'Bilinear', ''), ('CB', 'Cubic', ''), ('CBS', 'Cubic Spline', ''), ('LCZ', 'Lanczos', '') ]
 		)
 
 	################
@@ -380,7 +380,7 @@ class PredefCRS():
 
 class BGIS_OT_add_predef_crs(Operator):
 	bl_idname = "bgis.add_predef_crs"
-	bl_description = 'Add predefinate CRS'
+	bl_description = 'Add predefined CRS'
 	bl_label = "Add"
 	bl_options = {'INTERNAL'}
 
@@ -396,7 +396,7 @@ class BGIS_OT_add_predef_crs(Operator):
 		apiKey = settings.maptiler_api_key
 
 		if not apiKey:
-			#self.report({'ERROR'}, "MapTiler API key is required. Please set it in the preferences.") #report is not available outsite of the execute function
+			#self.report({'ERROR'}, "MapTiler API key is required. Please set it in the preferences.") #report is not available outside of the execute function
 			log.error("No Maptiler API key")
 			return
 
@@ -473,7 +473,7 @@ class BGIS_OT_add_predef_crs(Operator):
 class BGIS_OT_rmv_predef_crs(Operator):
 
 	bl_idname = "bgis.rmv_predef_crs"
-	bl_description = 'Remove predefinate CRS'
+	bl_description = 'Remove predefined CRS'
 	bl_label = "Remove"
 	bl_options = {'INTERNAL'}
 
@@ -490,7 +490,7 @@ class BGIS_OT_rmv_predef_crs(Operator):
 class BGIS_OT_reset_predef_crs(Operator):
 
 	bl_idname = "bgis.reset_predef_crs"
-	bl_description = 'Reset predefinate CRS'
+	bl_description = 'Reset predefined CRS'
 	bl_label = "Reset"
 	bl_options = {'INTERNAL'}
 
@@ -503,7 +503,7 @@ class BGIS_OT_reset_predef_crs(Operator):
 class BGIS_OT_edit_predef_crs(Operator):
 
 	bl_idname = "bgis.edit_predef_crs"
-	bl_description = 'Edit predefinate CRS'
+	bl_description = 'Edit predefined CRS'
 	bl_label = "Edit"
 	bl_options = {'INTERNAL'}
 
@@ -538,11 +538,11 @@ class BGIS_OT_edit_predef_crs(Operator):
 
 
 #################
-# Collection of operators to manage predefinates OSM Tags
+# Collection of operators to manage predefineds OSM Tags
 
 class BGIS_OT_add_osm_tag(Operator):
 	bl_idname = "bgis.add_osm_tag"
-	bl_description = 'Add new predefinate OSM filter tag'
+	bl_description = 'Add new predefined OSM filter tag'
 	bl_label = "Add"
 	bl_options = {'INTERNAL'}
 
@@ -563,7 +563,7 @@ class BGIS_OT_add_osm_tag(Operator):
 class BGIS_OT_rmv_osm_tag(Operator):
 
 	bl_idname = "bgis.rmv_osm_tag"
-	bl_description = 'Remove predefinate OSM filter tag'
+	bl_description = 'Remove predefined OSM filter tag'
 	bl_label = "Remove"
 	bl_options = {'INTERNAL'}
 
@@ -580,7 +580,7 @@ class BGIS_OT_rmv_osm_tag(Operator):
 class BGIS_OT_reset_osm_tags(Operator):
 
 	bl_idname = "bgis.reset_osm_tags"
-	bl_description = 'Reset predefinate OSM filter tag'
+	bl_description = 'Reset predefined OSM filter tag'
 	bl_label = "Reset"
 	bl_options = {'INTERNAL'}
 
@@ -593,7 +593,7 @@ class BGIS_OT_reset_osm_tags(Operator):
 class BGIS_OT_edit_osm_tag(Operator):
 
 	bl_idname = "bgis.edit_osm_tag"
-	bl_description = 'Edit predefinate OSM filter tag'
+	bl_description = 'Edit predefined OSM filter tag'
 	bl_label = "Edit"
 	bl_options = {'INTERNAL'}
 
