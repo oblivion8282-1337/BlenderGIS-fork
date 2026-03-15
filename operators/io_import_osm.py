@@ -88,6 +88,81 @@ def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'rela
 
 
 ########################
+
+def _get_or_create_building_geonodes():
+	"""Create a Geometry Nodes group for building extrusion from 'height' attribute."""
+	name = 'OSM Building Extrusion'
+	if name in bpy.data.node_groups:
+		return bpy.data.node_groups[name]
+
+	group = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+
+	# Interface sockets
+	group.interface.new_socket(name='Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+	s_mult = group.interface.new_socket(name='Height Multiplier', in_out='INPUT', socket_type='NodeSocketFloat')
+	s_mult.default_value = 1.0
+	s_mult.min_value = 0.0
+	s_mult.max_value = 10.0
+	group.interface.new_socket(name='Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+	nodes = group.nodes
+	links = group.links
+
+	# Group Input / Output
+	n_in = nodes.new('NodeGroupInput')
+	n_in.location = (-600, 0)
+	n_out = nodes.new('NodeGroupOutput')
+	n_out.location = (400, 0)
+
+	# Named Attribute → read "height" per face
+	n_attr = nodes.new('GeometryNodeInputNamedAttribute')
+	n_attr.data_type = 'FLOAT'
+	n_attr.inputs['Name'].default_value = 'height'
+	n_attr.location = (-600, -200)
+
+	# Multiply height by multiplier
+	n_mult = nodes.new('ShaderNodeMath')
+	n_mult.operation = 'MULTIPLY'
+	n_mult.location = (-300, -150)
+	links.new(n_attr.outputs['Attribute'], n_mult.inputs[0])
+	links.new(n_in.outputs['Height Multiplier'], n_mult.inputs[1])
+
+	# Combine XYZ → offset vector (0, 0, height)
+	n_xyz = nodes.new('ShaderNodeCombineXYZ')
+	n_xyz.location = (-100, -150)
+	links.new(n_mult.outputs[0], n_xyz.inputs['Z'])
+
+	# Selection: only extrude faces where height > 0
+	n_gt = nodes.new('FunctionNodeCompare')
+	n_gt.data_type = 'FLOAT'
+	n_gt.operation = 'GREATER_THAN'
+	n_gt.location = (-300, -300)
+	links.new(n_attr.outputs['Attribute'], n_gt.inputs['A'])
+	n_gt.inputs['B'].default_value = 0.0
+
+	# Extrude Mesh (Individual Faces)
+	n_ext = nodes.new('GeometryNodeExtrudeMesh')
+	n_ext.mode = 'FACES'
+	n_ext.location = (100, 0)
+	n_ext.inputs['Individual'].default_value = True
+	links.new(n_in.outputs['Geometry'], n_ext.inputs['Mesh'])
+	links.new(n_gt.outputs['Result'], n_ext.inputs['Selection'])
+	links.new(n_xyz.outputs['Vector'], n_ext.inputs['Offset'])
+
+	# Output
+	links.new(n_ext.outputs['Mesh'], n_out.inputs['Geometry'])
+
+	return group
+
+
+def _apply_building_geonodes(obj):
+	"""Add the building extrusion Geometry Nodes modifier to an object."""
+	group = _get_or_create_building_geonodes()
+	mod = obj.modifiers.new('Building Extrusion', type='NODES')
+	mod.node_group = group
+
+
+########################
 _join_buffer = None
 
 def joinBmesh(src_bm, dest_bm):
@@ -247,6 +322,11 @@ class OSM_IMPORT():
 			#>using an intermediate bmesh object allows some extra operation like extrusion
 			bm = bmesh.new()
 
+			#Pre-create height layer before adding faces (adding layers invalidates element refs)
+			is_building = closed and self.buildingsExtrusion and any(tag in closedWaysAreExtruded for tag in tags)
+			if is_building:
+				height_layer = bm.faces.layers.float.new('height')
+
 			if len(pts) == 1:
 				verts = [bm.verts.new(pt) for pt in pts]
 
@@ -259,7 +339,8 @@ class OSM_IMPORT():
 				if face.normal.z < 0:
 					face.normal_flip()
 
-				if self.buildingsExtrusion and any(tag in closedWaysAreExtruded for tag in tags):
+				#Store height as face attribute for Geometry Nodes extrusion
+				if is_building:
 					offset = None
 					if "height" in tags:
 							htag = tags["height"]
@@ -274,7 +355,6 @@ class OSM_IMPORT():
 										if not c.isdigit():
 											try:
 												offset, unit = float(htag[:i]), htag[i:].strip()
-												#todo : parse unit  25, 25m, 25 ft, etc.
 											except ValueError:
 												offset = None
 					elif "building:levels" in tags:
@@ -290,23 +370,7 @@ class OSM_IMPORT():
 						maxH = self.defaultHeight + self.randomHeightThreshold
 						offset = random.randint(int(minH), int(maxH))
 
-					#Extrude
-					"""
-					if self.extrusionAxis == 'NORMAL':
-						normal = face.normal
-						vect = normal * offset
-					elif self.extrusionAxis == 'Z':
-					"""
-					vect = (0, 0, offset)
-					faces = bmesh.ops.extrude_discrete_faces(bm, faces=[face]) #return {'faces': [BMFace]}
-					verts = faces['faces'][0].verts
-					if self.useElevObj:
-						#Making flat roof
-						z = max([v.co.z for v in verts]) + offset #get max z coord
-						for v in verts:
-							v.co.z = z
-					else:
-						bmesh.ops.translate(bm, verts=verts, vec=vect)
+					face[height_layer] = float(offset)
 
 
 			elif len(pts) > 1: #edge
@@ -325,6 +389,10 @@ class OSM_IMPORT():
 				mesh.validate()
 
 				obj = bpy.data.objects.new(name, mesh)
+
+				#Add Geometry Nodes extrusion for building objects
+				if self.buildingsExtrusion and any(tag in closedWaysAreExtruded for tag in tags):
+					_apply_building_geonodes(obj)
 
 				#Assign tags to custom props
 				obj['id'] = str(id) #cast to str to avoid overflow error "Python int too large to convert to C int"
@@ -462,6 +530,10 @@ class OSM_IMPORT():
 				obj = bpy.data.objects.new(name, mesh)
 				scn.collection.objects.link(obj)
 				obj.select_set(True)
+
+				#Add Geometry Nodes extrusion for building meshes
+				if self.buildingsExtrusion and 'building' in name.lower():
+					_apply_building_geonodes(obj)
 
 				vgroups = vgroupsObj.get(name, None)
 				if vgroups is not None:
