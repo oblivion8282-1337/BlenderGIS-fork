@@ -264,7 +264,8 @@ def _apply_street_geonodes(obj):
 def _get_or_create_terrain_snap_geonodes():
 	"""Create a Geometry Nodes group that snaps vertices onto a terrain mesh via raycast.
 	Vertices that miss the raycast (outside terrain extent) use the mean Z of hit vertices
-	as fallback to prevent dangling geometry."""
+	as fallback to prevent dangling geometry. Per-face Z averaging ensures flat roofs
+	on sloped terrain (Evaluate on Domain → Face)."""
 	name = 'OSM Snap to Terrain'
 	if name in bpy.data.node_groups:
 		return bpy.data.node_groups[name]
@@ -341,23 +342,29 @@ def _get_or_create_terrain_snap_geonodes():
 	links.new(n_stat.outputs['Mean'], n_switch.inputs[1])   # False: mean Z
 	links.new(n_hit_sep.outputs['Z'], n_switch.inputs[2])   # True: hit Z
 
+	# Evaluate on Domain (Face) → all verts of a face get same Z (flat roofs)
+	n_eod = nodes.new('GeometryNodeFieldOnDomain')
+	n_eod.domain = 'FACE'
+	n_eod.location = (500, -300)
+	links.new(n_switch.outputs[0], n_eod.inputs[0])
+
 	# Add Z offset
 	n_add = nodes.new('ShaderNodeMath')
 	n_add.operation = 'ADD'
-	n_add.location = (500, -200)
-	links.new(n_switch.outputs[0], n_add.inputs[0])
+	n_add.location = (600, -200)
+	links.new(n_eod.outputs[0], n_add.inputs[0])
 	links.new(n_in.outputs[2], n_add.inputs[1])
 
 	# New position (orig X, orig Y, final Z)
 	n_new_pos = nodes.new('ShaderNodeCombineXYZ')
-	n_new_pos.location = (500, -50)
+	n_new_pos.location = (600, -50)
 	links.new(n_sep.outputs['X'], n_new_pos.inputs['X'])
 	links.new(n_sep.outputs['Y'], n_new_pos.inputs['Y'])
 	links.new(n_add.outputs[0], n_new_pos.inputs['Z'])
 
 	# Set Position on ALL vertices
 	n_setpos = nodes.new('GeometryNodeSetPosition')
-	n_setpos.location = (650, 100)
+	n_setpos.location = (750, 100)
 	links.new(n_in.outputs[0], n_setpos.inputs['Geometry'])
 	links.new(n_new_pos.outputs[0], n_setpos.inputs['Position'])
 
