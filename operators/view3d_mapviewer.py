@@ -145,6 +145,10 @@ class BaseMap(GeoScene):
 	def get(self):
 		'''Launch run() function in a new thread'''
 		self.stop()
+		#Capture bpy state before starting thread (bpy API is not thread-safe)
+		self._req_area_width = self.area.width
+		self._req_area_height = self.area.height
+		self._req_view_location = tuple(self.reg3d.view_location)
 		self.srv.start()
 		self.thread = threading.Thread(target=self.run)
 		self.thread.start()
@@ -162,10 +166,11 @@ class BaseMap(GeoScene):
 		if self.srv.running and self.mosaic is not None:
 			#save image
 			self.mosaic.save(self.imgPath)
-		if self.srv.running:
-			#Place background image
-			self.place()
+		needsPlace = self.srv.running and self.mosaic is not None
 		self.srv.stop()
+		if needsPlace:
+			#Defer place() to main thread (bpy API is not thread-safe)
+			bpy.app.timers.register(self._place_on_main_thread)
 
 	def moveOrigin(self, dx, dy, useScale=True, updObjLoc=True):
 		'''Move scene origin and update props'''
@@ -173,18 +178,17 @@ class BaseMap(GeoScene):
 
 	def request(self):
 		'''Request map service to build a mosaic of required tiles to cover view3d area'''
-		#Get area dimension
-		w, h = self.area.width, self.area.height
-		#w, h = self.area3d.width, self.area3d.height #WARN return [1,1] !!!!????
+		#Get area dimension (use cached values from get() for thread safety)
+		w, h = self._req_area_width, self._req_area_height
 
-		#Get area bbox coords in destination tile matrix crs (map origin is bottom lelf)
+		#Get area bbox coords in destination tile matrix crs (map origin is bottom left)
 
 		#Method 1 : Get bbox coords in scene crs and then reproject the bbox if needed
 		z = self.lockedZoom if self.lockedZoom is not None else self.zoom
 		res = self.tm.getRes(z)
 		if self.crs == 'EPSG:4326':
 			res = meters2dd(res)
-		dx, dy, dz = self.reg3d.view_location
+		dx, dy, dz = self._req_view_location
 		ox = self.crsx + (dx * self.scale)
 		oy = self.crsy + (dy * self.scale)
 		xmin = ox - w/2 * res * self.scale
@@ -287,6 +291,11 @@ class BaseMap(GeoScene):
 
 		#Update image drawing
 		self.bkg.data.reload()
+
+	def _place_on_main_thread(self):
+		'''Timer callback to execute place() safely on the main thread'''
+		self.place()
+		return None #don't repeat
 
 
 
