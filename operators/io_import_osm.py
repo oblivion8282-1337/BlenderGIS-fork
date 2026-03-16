@@ -186,8 +186,68 @@ def _get_or_create_building_geonodes():
 	links.new(n_ext.outputs['Side'], n_setmat.inputs['Selection'])
 	n_setmat.inputs['Material Index'].default_value = 1
 
+	# --- Roof shape extrusion ---
+	# Read Named Attribute "roof_shape" (INT)
+	n_roof_shape = nodes.new('GeometryNodeInputNamedAttribute')
+	n_roof_shape.data_type = 'INT'
+	n_roof_shape.inputs['Name'].default_value = 'roof_shape'
+	n_roof_shape.location = (400, -400)
+
+	# Read Named Attribute "roof_height" (FLOAT)
+	n_roof_height = nodes.new('GeometryNodeInputNamedAttribute')
+	n_roof_height.data_type = 'FLOAT'
+	n_roof_height.inputs['Name'].default_value = 'roof_height'
+	n_roof_height.location = (400, -550)
+
+	# Selection: roof_shape > 0 AND Top face from first extrude
+	n_rs_gt = nodes.new('FunctionNodeCompare')
+	n_rs_gt.data_type = 'INT'
+	n_rs_gt.operation = 'GREATER_THAN'
+	n_rs_gt.location = (600, -400)
+	links.new(n_roof_shape.outputs['Attribute'], n_rs_gt.inputs[2])  # A (INT)
+	n_rs_gt.inputs[3].default_value = 0  # B (INT)
+
+	# AND: roof_shape > 0 AND Top (from first extrude)
+	n_roof_and = nodes.new('FunctionNodeBooleanMath')
+	n_roof_and.operation = 'AND'
+	n_roof_and.location = (600, -250)
+	links.new(n_rs_gt.outputs['Result'], n_roof_and.inputs[0])
+	links.new(n_ext.outputs['Top'], n_roof_and.inputs[1])
+
+	# Combine XYZ for roof offset (0, 0, roof_height)
+	n_roof_xyz = nodes.new('ShaderNodeCombineXYZ')
+	n_roof_xyz.location = (600, -550)
+	links.new(n_roof_height.outputs['Attribute'], n_roof_xyz.inputs['Z'])
+
+	# Second Extrude: push top faces up by roof_height
+	n_ext_roof = nodes.new('GeometryNodeExtrudeMesh')
+	n_ext_roof.mode = 'FACES'
+	n_ext_roof.location = (800, 0)
+	n_ext_roof.inputs['Individual'].default_value = True
+	links.new(n_setmat.outputs['Geometry'], n_ext_roof.inputs['Mesh'])
+	links.new(n_roof_and.outputs['Result'], n_ext_roof.inputs['Selection'])
+	links.new(n_roof_xyz.outputs['Vector'], n_ext_roof.inputs['Offset'])
+
+	# Scale the new roof-top faces inward to create a peak
+	n_roof_scale = nodes.new('GeometryNodeScaleElements')
+	n_roof_scale.domain = 'FACE'
+	n_roof_scale.location = (1000, 0)
+	links.new(n_ext_roof.outputs['Mesh'], n_roof_scale.inputs['Geometry'])
+	links.new(n_ext_roof.outputs['Top'], n_roof_scale.inputs['Selection'])
+	n_roof_scale.inputs['Scale'].default_value = 0.1
+
+	# Set Material Index = 2 on roof side faces (optional: distinguish roof sides)
+	n_setmat_roof = nodes.new('GeometryNodeSetMaterialIndex')
+	n_setmat_roof.location = (1200, 0)
+	links.new(n_roof_scale.outputs['Geometry'], n_setmat_roof.inputs['Geometry'])
+	links.new(n_ext_roof.outputs['Side'], n_setmat_roof.inputs['Selection'])
+	n_setmat_roof.inputs['Material Index'].default_value = 0  # Roof sides get rooftop material
+
+	# Move output node further right
+	n_out.location = (1400, 0)
+
 	# Output
-	links.new(n_setmat.outputs['Geometry'], n_out.inputs['Geometry'])
+	links.new(n_setmat_roof.outputs['Geometry'], n_out.inputs['Geometry'])
 
 	return group
 
@@ -744,6 +804,8 @@ class OSM_IMPORT():
 			is_street = not closed and 'highway' in tags
 			if is_building:
 				height_layer = bm.faces.layers.float.new('height')
+				roof_shape_layer = bm.faces.layers.int.new('roof_shape')
+				roof_height_layer = bm.faces.layers.float.new('roof_height')
 			if is_street:
 				width_layer = bm.verts.layers.float.new('width')
 
@@ -791,6 +853,30 @@ class OSM_IMPORT():
 						offset = random.randint(int(minH), int(maxH))
 
 					face[height_layer] = float(offset)
+
+					# --- Roof shape ---
+					_roof_shape_map = {
+						'flat': 0,
+						'gabled': 1,
+						'hipped': 2,
+						'pyramidal': 3,
+						'skillion': 4,
+					}
+					_rs_tag = tags.get('roof:shape', 'flat')
+					_rs_int = _roof_shape_map.get(_rs_tag, 0)
+					face[roof_shape_layer] = _rs_int
+
+					# --- Roof height ---
+					_rh = None
+					if 'roof:height' in tags:
+						try:
+							_rh = float(tags['roof:height'].replace(',', '.').replace('m', '').strip())
+						except ValueError:
+							_rh = None
+					if _rh is None:
+						# Default: 30% of building height for non-flat roofs, 0 for flat
+						_rh = float(offset) * 0.3 if _rs_int > 0 else 0.0
+					face[roof_height_layer] = _rh
 
 
 			elif len(pts) > 1: #edge
@@ -1278,9 +1364,185 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 
 		return {'FINISHED'}
 
+def _find_basemap_mesh_and_image():
+	"""Find the basemap terrain mesh and its satellite image texture.
+	Returns (mesh_object, image) or (None, None)."""
+	for obj in bpy.data.objects:
+		if obj.type != 'MESH' or not obj.name.startswith('EXPORT_'):
+			continue
+		for slot in obj.material_slots:
+			mat = slot.material
+			if not mat or not mat.use_nodes:
+				continue
+			for node in mat.node_tree.nodes:
+				if node.type == 'TEX_IMAGE' and node.image:
+					return obj, node.image
+	return None, None
+
+
+def _get_building_objects():
+	"""Return all mesh objects that have the Building Extrusion modifier."""
+	return [obj for obj in bpy.data.objects
+			if obj.type == 'MESH'
+			and any(m.type == 'NODES' and m.node_group and m.node_group.name == 'OSM Building Extrusion'
+					for m in obj.modifiers)]
+
+
+class IMPORTGIS_OT_apply_rooftop_texture(Operator):
+	"""Project basemap satellite texture onto building rooftops"""
+	bl_idname = "importgis.apply_rooftop_texture"
+	bl_label = "Apply Satellite Rooftop"
+	bl_description = "Project the basemap satellite texture onto building rooftops via Object Coordinates"
+	bl_options = {"UNDO"}
+
+	@classmethod
+	def poll(cls, context):
+		_, img = _find_basemap_mesh_and_image()
+		return img is not None
+
+	def execute(self, context):
+		terrain_obj, basemap_img = _find_basemap_mesh_and_image()
+		if not terrain_obj or not basemap_img:
+			self.report({'ERROR'}, "No basemap terrain mesh with image texture found")
+			return {'CANCELLED'}
+
+		# Compute mapping from terrain mesh bounds
+		# Object coords → UV: Scale = 1/extent, Location = -min/extent
+		depsgraph = context.evaluated_depsgraph_get()
+		eval_obj = terrain_obj.evaluated_get(depsgraph)
+		eval_mesh = eval_obj.to_mesh()
+
+		xs = [v.co.x for v in eval_mesh.vertices]
+		ys = [v.co.y for v in eval_mesh.vertices]
+		min_x, max_x = min(xs), max(xs)
+		min_y, max_y = min(ys), max(ys)
+		eval_obj.to_mesh_clear()
+
+		extent_x = max_x - min_x
+		extent_y = max_y - min_y
+		if extent_x == 0 or extent_y == 0:
+			self.report({'ERROR'}, "Terrain mesh has zero extent")
+			return {'CANCELLED'}
+
+		scale_x = 1.0 / extent_x
+		scale_y = 1.0 / extent_y
+		loc_x = -min_x * scale_x
+		loc_y = -min_y * scale_y
+
+		# Create/update the rooftop material
+		name = 'OSM_Rooftop_Satellite'
+		mat = bpy.data.materials.get(name)
+		if not mat:
+			mat = bpy.data.materials.new(name)
+		mat.use_nodes = True
+		tree = mat.node_tree
+		tree.nodes.clear()
+
+		n_output = tree.nodes.new('ShaderNodeOutputMaterial')
+		n_output.location = (600, 0)
+
+		n_bsdf = tree.nodes.new('ShaderNodeBsdfPrincipled')
+		n_bsdf.location = (400, 0)
+		n_bsdf.inputs['Roughness'].default_value = 0.9
+		tree.links.new(n_bsdf.outputs['BSDF'], n_output.inputs['Surface'])
+
+		n_texcoord = tree.nodes.new('ShaderNodeTexCoord')
+		n_texcoord.location = (-200, 0)
+
+		n_mapping = tree.nodes.new('ShaderNodeMapping')
+		n_mapping.location = (0, 0)
+		n_mapping.inputs['Location'].default_value = (loc_x, loc_y, 0.0)
+		n_mapping.inputs['Scale'].default_value = (scale_x, scale_y, 1.0)
+		tree.links.new(n_texcoord.outputs['Object'], n_mapping.inputs['Vector'])
+
+		n_img = tree.nodes.new('ShaderNodeTexImage')
+		n_img.location = (200, 0)
+		n_img.image = basemap_img
+		tree.links.new(n_mapping.outputs['Vector'], n_img.inputs['Vector'])
+		tree.links.new(n_img.outputs['Color'], n_bsdf.inputs['Base Color'])
+
+		# Apply to building objects
+		buildings = _get_building_objects()
+		count = 0
+		for obj in buildings:
+			existing = [s.material.name for s in obj.material_slots if s.material]
+			if name not in existing:
+				if len(obj.material_slots) == 0:
+					obj.data.materials.append(mat)
+				else:
+					obj.material_slots[0].material = mat
+			else:
+				# Update existing slot
+				for i, slot in enumerate(obj.material_slots):
+					if slot.material and slot.material.name == name:
+						slot.material = mat
+			count += 1
+
+		self.report({'INFO'}, f"Satellite rooftop applied to {count} building(s)")
+		return {'FINISHED'}
+
+
+class IMPORTGIS_OT_apply_facade_shader(Operator):
+	"""Apply procedural window facade shader to building walls"""
+	bl_idname = "importgis.apply_facade_shader"
+	bl_label = "Apply Facade Shader"
+	bl_description = "Apply the procedural facade shader with tangent-projected windows to building side faces"
+	bl_options = {"UNDO"}
+
+	@classmethod
+	def poll(cls, context):
+		return len(_get_building_objects()) > 0
+
+	def execute(self, context):
+		mat_facade = _get_or_create_facade_material()
+		mat_roof = _get_or_create_rooftop_material()
+
+		buildings = _get_building_objects()
+		count = 0
+		for obj in buildings:
+			existing = [s.material.name for s in obj.material_slots if s.material]
+			# Ensure slot 0 exists (rooftop)
+			if len(obj.material_slots) == 0:
+				obj.data.materials.append(mat_roof)
+			# Ensure slot 1 exists (facade)
+			if mat_facade.name not in existing:
+				if len(obj.material_slots) < 2:
+					obj.data.materials.append(mat_facade)
+				else:
+					obj.material_slots[1].material = mat_facade
+			count += 1
+
+		self.report({'INFO'}, f"Facade shader applied to {count} building(s)")
+		return {'FINISHED'}
+
+
+class IMPORTGIS_PT_building_materials(Panel):
+	"""Building material tools in the GIS sidebar"""
+	bl_label = "Building Materials"
+	bl_idname = "IMPORTGIS_PT_building_materials"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+
+	def draw(self, context):
+		layout = self.layout
+		buildings = _get_building_objects()
+		if not buildings:
+			layout.label(text="No buildings in scene", icon='INFO')
+			return
+
+		layout.label(text=f"{len(buildings)} building object(s)", icon='HOME')
+		layout.separator()
+		layout.operator("importgis.apply_rooftop_texture", icon='IMAGE_DATA')
+		layout.operator("importgis.apply_facade_shader", icon='MOD_BUILD')
+
+
 classes = [
 	IMPORTGIS_OT_osm_file,
-	IMPORTGIS_OT_osm_query
+	IMPORTGIS_OT_osm_query,
+	IMPORTGIS_OT_apply_rooftop_texture,
+	IMPORTGIS_OT_apply_facade_shader,
+	IMPORTGIS_PT_building_materials,
 ]
 
 def register():

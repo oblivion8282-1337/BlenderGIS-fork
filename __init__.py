@@ -54,6 +54,7 @@ IMPORT_GEORASTER = True
 IMPORT_OSM = True
 IMPORT_SHP = True
 IMPORT_ASC = True
+IMPORT_GEOJSON = True
 DELAUNAY = True
 TERRAIN_NODES = True
 TERRAIN_RECLASS = True
@@ -156,6 +157,8 @@ if IMPORT_SHP:
 	from .operators import io_import_shp
 if IMPORT_ASC:
 	from .operators import io_import_asc
+if IMPORT_GEOJSON:
+	from .operators import io_import_geojson
 if DELAUNAY:
 	from .operators import mesh_delaunay_voronoi
 if TERRAIN_NODES:
@@ -267,6 +270,8 @@ class VIEW3D_PT_gis_import(bpy.types.Panel):
 			layout.operator("importgis.georaster", icon_value=icons_dict["raster"].icon_id, text="Georeferenced raster")
 		if IMPORT_OSM:
 			layout.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="OpenStreetMap (.osm)")
+		if IMPORT_GEOJSON:
+			layout.operator("importgis.geojson_file", icon='FILE', text="GeoJSON (.geojson)")
 		if IMPORT_ASC:
 			layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
 
@@ -437,6 +442,8 @@ def register():
 		io_import_osm.register()
 	if IMPORT_ASC:
 		io_import_asc.register()
+	if IMPORT_GEOJSON:
+		io_import_geojson.register()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.register()
 	if DROP:
@@ -506,6 +513,8 @@ def unregister():
 		io_import_osm.unregister()
 	if IMPORT_ASC:
 		io_import_asc.unregister()
+	if IMPORT_GEOJSON:
+		io_import_geojson.unregister()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.unregister()
 	if DROP:

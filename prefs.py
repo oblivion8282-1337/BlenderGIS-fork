@@ -36,8 +36,32 @@ As the json backend is stored in addon preferences, the property will be saved a
 
 
 DEFAULT_CRS = [
-	('EPSG:3857', 'Web Mercator', 'Worldwide projection, high distortions, not suitable for precision modelling'),
-	('EPSG:4326', 'WGS84 latlon', 'Longitude and latitude in degrees, DO NOT USE AS SCENE CRS (this system is defined only for reprojection tasks')
+	# -- Global --
+	('EPSG:4326', 'WGS 84 (GPS, global)', 'Longitude and latitude in degrees, DO NOT USE AS SCENE CRS (defined only for reprojection tasks)'),
+	('EPSG:3857', 'Web Mercator (Google Maps, OSM)', 'Worldwide projection used by web maps, high distortions at poles, not suitable for precision modelling'),
+	# -- Europe --
+	('EPSG:25832', 'ETRS89 / UTM zone 32N', 'Germany, Austria, Switzerland, central Europe'),
+	('EPSG:25833', 'ETRS89 / UTM zone 33N', 'Eastern Germany, Poland, Czech Republic'),
+	('EPSG:25831', 'ETRS89 / UTM zone 31N', 'France, Benelux, western Europe'),
+	('EPSG:32632', 'WGS 84 / UTM zone 32N', 'Central Europe (WGS 84 based)'),
+	('EPSG:32633', 'WGS 84 / UTM zone 33N', 'Eastern Europe (WGS 84 based)'),
+	('EPSG:2154', 'RGF93 / Lambert-93', 'France official projection'),
+	('EPSG:27700', 'OSGB 1936 / British National Grid', 'United Kingdom'),
+	('EPSG:31256', 'MGI / Austria GK East', 'Austria East (Gauss-Krueger)'),
+	('EPSG:31257', 'MGI / Austria GK Central', 'Austria Central (Gauss-Krueger)'),
+	('EPSG:31258', 'MGI / Austria GK West', 'Austria West (Gauss-Krueger)'),
+	('EPSG:21781', 'CH1903 / LV03', 'Switzerland (old system)'),
+	('EPSG:2056', 'CH1903+ / LV95', 'Switzerland (new official system)'),
+	('EPSG:28992', 'Amersfoort / RD New', 'Netherlands official projection'),
+	# -- North America --
+	('EPSG:26917', 'NAD83 / UTM zone 17N', 'US East Coast'),
+	('EPSG:26918', 'NAD83 / UTM zone 18N', 'US Northeast'),
+	('EPSG:32610', 'WGS 84 / UTM zone 10N', 'US West Coast'),
+	('EPSG:32611', 'WGS 84 / UTM zone 11N', 'US Mountain region'),
+	('EPSG:2263', 'NAD83 / New York Long Island', 'New York City / Long Island (feet)'),
+	# -- Other --
+	('EPSG:32648', 'WGS 84 / UTM zone 48N', 'Southeast Asia'),
+	('EPSG:32756', 'WGS 84 / UTM zone 56S', 'Australia East Coast'),
 ]
 
 
