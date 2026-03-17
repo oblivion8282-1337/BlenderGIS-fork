@@ -1024,22 +1024,33 @@ class IMPORTGIS_OT_gpx_overlay_toggle(Operator):
 	bl_options = {'INTERNAL'}
 
 	def execute(self, context):
-		# Determine current state: if any GPX object is visible → turn off
 		gpx_objs = [obj for obj in context.scene.objects
 					if obj.get('gpx_type') in ('track', 'route')]
-		currently_visible = any(not obj.hide_get() for obj in gpx_objs)
+		overlay_on = _draw_handler is not None
 
-		if currently_visible:
-			# Hide everything
+		if overlay_on:
+			# Switch to normal 3D mode
 			gpx_overlay_remove()
 			for obj in gpx_objs:
-				obj.hide_set(True)
+				obj.show_in_front = False
+			# Turn off emission on route material
+			mat = bpy.data.materials.get('GPX Route (route)')
+			if mat and mat.use_nodes:
+				bsdf = mat.node_tree.nodes.get('Principled BSDF')
+				if bsdf:
+					bsdf.inputs['Emission Strength'].default_value = 0.0
 			self.report({'INFO'}, "GPX overlay disabled")
 		else:
-			# Show everything
+			# Switch to overlay mode
 			gpx_overlay_ensure()
 			for obj in gpx_objs:
-				obj.hide_set(False)
+				obj.show_in_front = True
+			# Turn on emission on route material
+			mat = bpy.data.materials.get('GPX Route (route)')
+			if mat and mat.use_nodes:
+				bsdf = mat.node_tree.nodes.get('Principled BSDF')
+				if bsdf:
+					bsdf.inputs['Emission Strength'].default_value = 2.0
 			self.report({'INFO'}, "GPX overlay enabled")
 
 		# Force redraw all 3D viewports
