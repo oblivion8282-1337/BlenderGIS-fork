@@ -1024,12 +1024,24 @@ class IMPORTGIS_OT_gpx_overlay_toggle(Operator):
 	bl_options = {'INTERNAL'}
 
 	def execute(self, context):
-		if _draw_handler is not None:
+		# Determine current state: if any GPX object is visible → turn off
+		gpx_objs = [obj for obj in context.scene.objects
+					if obj.get('gpx_type') in ('track', 'route')]
+		currently_visible = any(not obj.hide_get() for obj in gpx_objs)
+
+		if currently_visible:
+			# Hide everything
 			gpx_overlay_remove()
+			for obj in gpx_objs:
+				obj.hide_set(True)
 			self.report({'INFO'}, "GPX overlay disabled")
 		else:
+			# Show everything
 			gpx_overlay_ensure()
+			for obj in gpx_objs:
+				obj.hide_set(False)
 			self.report({'INFO'}, "GPX overlay enabled")
+
 		# Force redraw all 3D viewports
 		for area in context.screen.areas:
 			if area.type == 'VIEW_3D':
