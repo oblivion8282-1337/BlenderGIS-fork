@@ -108,6 +108,37 @@ def _first_coord_gpx(gpx_data):
 	return None
 
 
+def _gpx_bbox(gpx_data):
+	"""Return (min_lon, min_lat, max_lon, max_lat) bounding box of all GPX data."""
+	lons, lats = [], []
+	for wpt in gpx_data['waypoints']:
+		lons.append(wpt[0]); lats.append(wpt[1])
+	for rte in gpx_data['routes']:
+		for p in rte['points']:
+			lons.append(p[0]); lats.append(p[1])
+	for trk in gpx_data['tracks']:
+		for seg in trk['segments']:
+			for p in seg:
+				lons.append(p[0]); lats.append(p[1])
+	if not lons:
+		return None
+	return (min(lons), min(lats), max(lons), max(lats))
+
+
+def _zoom_for_bbox(min_lon, min_lat, max_lon, max_lat):
+	"""Estimate a Web Mercator zoom level that fits the given bounding box.
+	Returns an int zoom level (0–19)."""
+	import math
+	# Approximate degrees span → zoom level
+	# At zoom 0, the whole world (360°) fits. Each zoom halves the span.
+	lon_span = max(max_lon - min_lon, 0.001)
+	lat_span = max(max_lat - min_lat, 0.001)
+	span = max(lon_span, lat_span)
+	# zoom ≈ log2(360 / span) with some padding
+	zoom = int(math.log2(360.0 / span)) - 1
+	return max(0, min(zoom, 19))
+
+
 # ---------------------------------------------------------------------------
 # Route material
 # ---------------------------------------------------------------------------
@@ -534,6 +565,12 @@ class IMPORTGIS_OT_gpx_file(Operator):
 		default=True,
 	)
 
+	autoBasemap: BoolProperty(
+		name="Auto-load basemap",
+		description="Open the Map Viewer centered on the route after import",
+		default=False,
+	)
+
 	# ---------------------------------------------------------------------------
 
 	def invoke(self, context, event):
@@ -554,6 +591,8 @@ class IMPORTGIS_OT_gpx_file(Operator):
 		layout.prop(self, 'routeWidth')
 		layout.prop(self, 'curveResolution')
 		layout.prop(self, 'snapToTerrain')
+		layout.separator()
+		layout.prop(self, 'autoBasemap')
 
 	# ---------------------------------------------------------------------------
 
@@ -828,6 +867,39 @@ class IMPORTGIS_OT_gpx_file(Operator):
 		msg = f"Imported GPX: {n_tracks} track(s), {n_routes} route(s), {n_wpts} waypoint(s)"
 		self.report({'INFO'}, msg)
 		log.info(msg)
+
+		# --- Auto-load basemap --------------------------------------------------
+		if self.autoBasemap:
+			bb = _gpx_bbox(gpx_data)
+			if bb:
+				min_lon, min_lat, max_lon, max_lat = bb
+				center_lon = (min_lon + max_lon) / 2.0
+				center_lat = (min_lat + max_lat) / 2.0
+
+				# Set scene origin to route center
+				cx, cy = reprojPt(4326, dstCRS, center_lon, center_lat)
+				geoscn.setOriginPrj(cx, cy)
+
+				# Shift all imported objects so they stay in place relative to new origin
+				old_dx, old_dy = dx, dy
+				new_dx, new_dy = cx, cy
+				shift_x = old_dx - new_dx
+				shift_y = old_dy - new_dy
+				for obj in created_objects:
+					obj.location.x += shift_x
+					obj.location.y += shift_y
+
+				# Set zoom level
+				zoom = _zoom_for_bbox(min_lon, min_lat, max_lon, max_lat)
+				geoscn.zoom = zoom
+				log.info("Auto-basemap: center=%.4f,%.4f zoom=%d", center_lon, center_lat, zoom)
+
+				# Open map viewer dialog
+				try:
+					bpy.ops.view3d.map_start('INVOKE_DEFAULT')
+				except Exception:
+					log.warning("Could not auto-start map viewer", exc_info=True)
+					self.report({'INFO'}, msg + " — use Basemap button to load map")
 
 		return {'FINISHED'}
 
