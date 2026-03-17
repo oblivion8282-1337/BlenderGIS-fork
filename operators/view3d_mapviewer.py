@@ -1172,14 +1172,6 @@ class VIEW3D_OT_map_viewer(Operator):
 				bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
 				context.area.header_text_set(None)
 
-				# Remove previous export mesh (allows switching basemap source)
-				for old_obj in list(context.scene.objects):
-					if old_obj.type == 'MESH' and old_obj.name.startswith('EXPORT_'):
-						old_data = old_obj.data
-						bpy.data.objects.remove(old_obj, do_unlink=True)
-						if old_data.users == 0:
-							bpy.data.meshes.remove(old_data)
-
 				#Copy image to new datablock
 				bpyImg = bpy.data.images.load(self.map.imgPath) #(self.map.img.filepath)
 				name = 'EXPORT_' + self.map.srckey + '_' + self.map.laykey + '_' + self.map.grdkey
@@ -1461,11 +1453,11 @@ class VIEW3D_OT_map_goto_history(bpy.types.Operator):
 
 
 class VIEW3D_OT_map_resume(bpy.types.Operator):
-	"""Resume the map viewer — shows source dialog to allow changing basemap"""
+	"""Resume the map viewer with the last used settings"""
 
 	bl_idname = "view3d.map_resume"
 	bl_label = "Resume Map"
-	bl_description = 'Resume map viewer at current position (change source if needed)'
+	bl_description = 'Resume map viewer with last settings (no dialog)'
 	bl_options = {'INTERNAL'}
 
 	@classmethod
@@ -1476,9 +1468,15 @@ class VIEW3D_OT_map_resume(bpy.types.Operator):
 			and _last_map_grd is not None)
 
 	def execute(self, context):
-		# Open the full map_start dialog so the user can change the source,
-		# but keep recenter=False to stay at the current position
-		bpy.ops.view3d.map_start('INVOKE_DEFAULT')
+		prefs = context.preferences.addons[PKG].preferences
+		#check cache folder
+		folder = prefs.cacheFolder
+		if folder == "" or not os.path.exists(folder):
+			self.report({'ERROR'}, "Please define a valid cache folder path in addon's preferences")
+			return {'CANCELLED'}
+		bpy.ops.view3d.map_viewer('INVOKE_DEFAULT',
+			srckey=_last_map_src, laykey=_last_map_lay, grdkey=_last_map_grd,
+			recenter=False)
 		return {'FINISHED'}
 
 
