@@ -1014,11 +1014,33 @@ def gpx_overlay_remove():
 
 
 # ---------------------------------------------------------------------------
+# Toggle Overlay Operator
+# ---------------------------------------------------------------------------
+
+class IMPORTGIS_OT_gpx_overlay_toggle(Operator):
+	"""Toggle GPX route overlay on/off"""
+	bl_idname = "importgis.gpx_overlay_toggle"
+	bl_label = "GPX Overlay"
+	bl_options = {'INTERNAL'}
+
+	def execute(self, context):
+		if _draw_handler is not None:
+			gpx_overlay_remove()
+			self.report({'INFO'}, "GPX overlay disabled")
+		else:
+			gpx_overlay_ensure()
+			context.area.tag_redraw()
+			self.report({'INFO'}, "GPX overlay enabled")
+		return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 classes = [
 	IMPORTGIS_OT_gpx_file,
+	IMPORTGIS_OT_gpx_overlay_toggle,
 ]
 
 

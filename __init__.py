@@ -276,7 +276,12 @@ class VIEW3D_PT_gis_import(bpy.types.Panel):
 		if IMPORT_GEOJSON:
 			layout.operator("importgis.geojson_file", icon='FILE', text="GeoJSON (.geojson)")
 		if IMPORT_GPX:
-			layout.operator("importgis.gpx_file", icon='CURVE_PATH', text="GPX Track (.gpx)")
+			row = layout.row(align=True)
+			row.operator("importgis.gpx_file", icon='CURVE_PATH', text="GPX Track (.gpx)")
+			import sys
+			_gpx = sys.modules.get(__package__ + '.operators.io_import_gpx')
+			overlay_active = _gpx and _gpx._draw_handler is not None
+			row.operator("importgis.gpx_overlay_toggle", icon='OVERLAY' if overlay_active else 'GHOST_DISABLED', text="")
 		if IMPORT_ASC:
 			layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
 
