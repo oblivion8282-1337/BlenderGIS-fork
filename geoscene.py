@@ -663,11 +663,12 @@ def setCrsy(self, y):
 ################  PANEL ######################
 
 class GEOSCENE_PT_georef(Panel):
-	bl_category = "View"#"GIS"
-	bl_label = "Geoscene"
+	bl_category = "GIS"
+	bl_label = "Georeferencing"
 	bl_space_type = "VIEW_3D"
-	bl_context = "objectmode"
 	bl_region_type = "UI"
+	bl_parent_id = "VIEW3D_PT_gis_map"
+	bl_order = 0
 
 
 	def draw(self, context):

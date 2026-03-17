@@ -215,7 +215,7 @@ SOURCES = {
 		"grid": 'WM',
 		"quadTree": False,
 		"layers" : {
-			"S2_2016" : {"urlKey" : 's2cloudless_3857', "name" : '2016 (CC BY 4.0)', "description" : 'Sentinel-2 cloudless 2016 — commercial use OK with attribution', "format" : 'jpeg', "zmin" : 0, "zmax" : 21}
+			"S2_2016" : {"urlKey" : 's2cloudless_3857', "name" : '2016 (CC BY 4.0)', "description" : 'Sentinel-2 cloudless 2016 — commercial use OK with attribution', "format" : 'jpeg', "zmin" : 0, "zmax" : 17}
 		},
 		"urlTemplate": "https://tiles.maps.eox.at/wmts/1.0.0/{LAY}/default/g/{Z}/{Y}/{X}.jpg",
 		"referer": "https://s2maps.eu"
@@ -230,13 +230,13 @@ SOURCES = {
 		"grid": 'WM',
 		"quadTree": False,
 		"layers" : {
-			"S2_2024" : {"urlKey" : 's2cloudless-2024_3857', "name" : '2024', "description" : 'Sentinel-2 cloudless 2024 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2023" : {"urlKey" : 's2cloudless-2023_3857', "name" : '2023', "description" : 'Sentinel-2 cloudless 2023 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2022" : {"urlKey" : 's2cloudless-2022_3857', "name" : '2022', "description" : 'Sentinel-2 cloudless 2022 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2021" : {"urlKey" : 's2cloudless-2021_3857', "name" : '2021', "description" : 'Sentinel-2 cloudless 2021 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2020" : {"urlKey" : 's2cloudless-2020_3857', "name" : '2020', "description" : 'Sentinel-2 cloudless 2020 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2019" : {"urlKey" : 's2cloudless-2019_3857', "name" : '2019', "description" : 'Sentinel-2 cloudless 2019 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2018" : {"urlKey" : 's2cloudless-2018_3857', "name" : '2018', "description" : 'Sentinel-2 cloudless 2018 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21}
+			"S2_2024" : {"urlKey" : 's2cloudless-2024_3857', "name" : '2024', "description" : 'Sentinel-2 cloudless 2024 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2023" : {"urlKey" : 's2cloudless-2023_3857', "name" : '2023', "description" : 'Sentinel-2 cloudless 2023 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2022" : {"urlKey" : 's2cloudless-2022_3857', "name" : '2022', "description" : 'Sentinel-2 cloudless 2022 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2021" : {"urlKey" : 's2cloudless-2021_3857', "name" : '2021', "description" : 'Sentinel-2 cloudless 2021 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2020" : {"urlKey" : 's2cloudless-2020_3857', "name" : '2020', "description" : 'Sentinel-2 cloudless 2020 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2019" : {"urlKey" : 's2cloudless-2019_3857', "name" : '2019', "description" : 'Sentinel-2 cloudless 2019 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17},
+			"S2_2018" : {"urlKey" : 's2cloudless-2018_3857', "name" : '2018', "description" : 'Sentinel-2 cloudless 2018 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 17}
 		},
 		"urlTemplate": "https://tiles.maps.eox.at/wmts/1.0.0/{LAY}/default/g/{Z}/{Y}/{X}.jpg",
 		"referer": "https://s2maps.eu"

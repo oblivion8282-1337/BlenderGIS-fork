@@ -251,21 +251,23 @@ class BaseMap(GeoScene):
 		except IndexError:
 			self.img = bpy.data.images.load(self.imgPath)
 
-		#Get or load background image
+		#Get or reuse background image empty
 		empties = [obj for obj in self.scn.objects if obj.type == 'EMPTY']
 		bkgs = [obj for obj in empties if obj.empty_display_type == 'IMAGE']
-		for bkg in bkgs:
-			bkg.hide_viewport = True
-		try:
-			self.bkg = [bkg for bkg in bkgs if bkg.data.filepath == self.imgPath and len(bkg.data.packed_files) == 0][0]
-		except IndexError:
-			self.bkg = bpy.data.objects.new(self.name, None) #None will create an empty
+		if bkgs:
+			self.bkg = bkgs[0]
+			self.bkg.name = self.name
+			self.bkg.data = self.img
+			self.bkg.hide_viewport = False
+			# Remove stale leftover background empties
+			for bkg in bkgs[1:]:
+				bpy.data.objects.remove(bkg, do_unlink=True)
+		else:
+			self.bkg = bpy.data.objects.new(self.name, None)
 			self.bkg.empty_display_type = 'IMAGE'
 			self.bkg.empty_image_depth = 'BACK'
 			self.bkg.data = self.img
 			self.scn.collection.objects.link(self.bkg)
-		else:
-			self.bkg.hide_viewport = False
 
 		#Get some image props
 		img_ox, img_oy = self.mosaic.center
@@ -586,7 +588,7 @@ class VIEW3D_OT_map_start(Operator):
 
 	zoom: IntProperty(name='Zoom level', min=0, max=25)
 
-	recenter: BoolProperty(name='Center to existing objects')
+	recenter: BoolProperty(name='Center to existing objects', default=True)
 
 	#special function to auto redraw an operator popup called through invoke_props_dialog
 	def check(self, context):
@@ -846,6 +848,58 @@ class VIEW3D_OT_map_viewer(Operator):
 
 		return {'RUNNING_MODAL'}
 
+
+	def _cleanup_modal(self, context):
+		"""Remove draw handlers, timer, header text and deactivate map viewer."""
+		global _map_viewer_active
+		_map_viewer_active = False
+		self.map.stop()
+		bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
+		bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
+		context.area.header_text_set(None)
+		context.window_manager.event_timer_remove(self.timer)
+
+	def _do_export(self, context):
+		"""Export current basemap tiles as textured mesh."""
+		self._cleanup_modal(context)
+		self.map.bkg.hide_viewport = True
+
+		#Copy image to new datablock
+		bpyImg = bpy.data.images.load(self.map.imgPath)
+		name = 'EXPORT_' + self.map.srckey + '_' + self.map.laykey + '_' + self.map.grdkey
+		bpyImg.name = name
+		bpyImg.pack()
+
+		#Add new attribute to GeoRaster (used by geoRastUVmap function)
+		rast = self.map.mosaic
+		setattr(rast, 'bpyImg', bpyImg)
+
+		#Create Mesh
+		dx, dy = self.map.getOriginPrj()
+		mesh = rasterExtentToMesh(name, rast, dx, dy, pxLoc='CORNER')
+
+		#Create object
+		obj = placeObj(mesh, name)
+
+		#UV mapping
+		uvTxtLayer = mesh.uv_layers.new(name='rastUVmap')
+		geoRastUVmap(obj, uvTxtLayer, rast, dx, dy)
+
+		#Create material
+		mat = bpy.data.materials.new('rastMat')
+		obj.data.materials.append(mat)
+		addTexture(mat, bpyImg, uvTxtLayer)
+
+		#Adjust 3d view and display textures
+		if self.prefs.adjust3Dview:
+			adjust3Dview(context, getBBOX.fromObj(obj))
+		if self.prefs.forceTexturedSolid:
+			showTextures(context)
+
+		#Restore 3D perspective view
+		context.area.spaces.active.region_3d.view_perspective = 'PERSP'
+
+		return {'FINISHED'}
 
 	def modal(self, context, event):
 		global _map_viewer_active, _goto_pending
@@ -1114,32 +1168,20 @@ class VIEW3D_OT_map_viewer(Operator):
 
 		#SWITCH LAYER
 		if event.type == 'SPACE':
-			self.map.stop()
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-
-			context.area.header_text_set(None)
+			self._cleanup_modal(context)
 			self.restart = True
 			return {'FINISHED'}
 
 		#GO TO
 		if event.type == 'G':
-			self.map.stop()
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-
-			context.area.header_text_set(None)
+			self._cleanup_modal(context)
 			self.restart = True
 			self.dialog = 'SEARCH'
 			return {'FINISHED'}
 
 		#OPTIONS
 		if event.type == 'O':
-			self.map.stop()
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
-			bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-
-			context.area.header_text_set(None)
+			self._cleanup_modal(context)
 			self.restart = True
 			self.dialog = 'OPTIONS'
 			return {'FINISHED'}
@@ -1162,49 +1204,14 @@ class VIEW3D_OT_map_viewer(Operator):
 
 		#EXPORT
 		if event.type == 'E' and event.value == 'PRESS':
-			#
-			if not self.map.srv.running and self.map.mosaic is not None:
-				_map_viewer_active = False
-				self.map.stop()
-				self.map.bkg.hide_viewport = True
-
-				bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
-				bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-				context.area.header_text_set(None)
-
-				#Copy image to new datablock
-				bpyImg = bpy.data.images.load(self.map.imgPath) #(self.map.img.filepath)
-				name = 'EXPORT_' + self.map.srckey + '_' + self.map.laykey + '_' + self.map.grdkey
-				bpyImg.name = name
-				bpyImg.pack()
-
-				#Add new attribute to GeoRaster (used by geoRastUVmap function)
-				rast = self.map.mosaic
-				setattr(rast, 'bpyImg', bpyImg)
-
-				#Create Mesh
-				dx, dy = self.map.getOriginPrj()
-				mesh = rasterExtentToMesh(name, rast, dx, dy, pxLoc='CORNER')
-
-				#Create object
-				obj = placeObj(mesh, name)
-
-				#UV mapping
-				uvTxtLayer = mesh.uv_layers.new(name='rastUVmap')# Add UV map texture layer
-				geoRastUVmap(obj, uvTxtLayer, rast, dx, dy)
-
-				#Create material
-				mat = bpy.data.materials.new('rastMat')
-				obj.data.materials.append(mat)
-				addTexture(mat, bpyImg, uvTxtLayer)
-
-				#Adjust 3d view and display textures
-				if self.prefs.adjust3Dview:
-					adjust3Dview(context, getBBOX.fromObj(obj))
-				if self.prefs.forceTexturedSolid:
-					showTextures(context)
-
-				return {'FINISHED'}
+			print(f"[BGIS DEBUG] E pressed: srv.running={self.map.srv.running}, mosaic={self.map.mosaic is not None}")
+			if self.map.srv.running or self.map.mosaic is None:
+				self.progress = 'Tiles still loading, please wait…'
+				print("[BGIS DEBUG] E blocked — tiles not ready")
+				return {'RUNNING_MODAL'}
+			else:
+				print("[BGIS DEBUG] E → _do_export()")
+				return self._do_export(context)
 
 		#EXIT
 		if event.type == 'ESC' and event.value == 'PRESS':
@@ -1213,11 +1220,7 @@ class VIEW3D_OT_map_viewer(Operator):
 				self.zoomBoxMode = False
 				context.window.cursor_set('DEFAULT')
 			else:
-				_map_viewer_active = False
-				self.map.stop()
-				bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
-				bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-				context.area.header_text_set(None)
+				self._cleanup_modal(context)
 				return {'CANCELLED'}
 
 
@@ -1476,7 +1479,7 @@ class VIEW3D_OT_map_resume(bpy.types.Operator):
 			return {'CANCELLED'}
 		bpy.ops.view3d.map_viewer('INVOKE_DEFAULT',
 			srckey=_last_map_src, laykey=_last_map_lay, grdkey=_last_map_grd,
-			recenter=False)
+			recenter=True)
 		return {'FINISHED'}
 
 

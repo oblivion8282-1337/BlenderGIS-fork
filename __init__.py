@@ -202,13 +202,18 @@ class BGIS_OT_logs(bpy.types.Operator):
 # N-Panel Sidebar
 ####################################
 
-class VIEW3D_PT_gis_webgeodata(bpy.types.Panel):
-	bl_label = "Web Geodata"
-	bl_idname = "VIEW3D_PT_gis_webgeodata"
+# ─── Parent: Map ──────────────────────────────────────────
+
+class VIEW3D_PT_gis_map(bpy.types.Panel):
+	bl_label = "Map"
+	bl_idname = "VIEW3D_PT_gis_map"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
 	bl_category = 'GIS'
 	bl_order = 0
+
+	def draw_header(self, context):
+		self.layout.label(icon='WORLD')
 
 	def draw(self, context):
 		layout = self.layout
@@ -217,17 +222,16 @@ class VIEW3D_PT_gis_webgeodata(bpy.types.Panel):
 			row = layout.row()
 			row.operator("view3d.map_resume", icon='LOOP_FORWARDS', text="Resume Map")
 			row.enabled = bpy.ops.view3d.map_resume.poll() if hasattr(bpy.ops.view3d, 'map_resume') else False
-		if IMPORT_OSM:
-			layout.operator("importgis.osm_query", icon_value=icons_dict["osm"].icon_id)
-		if GET_DEM:
-			layout.operator("importgis.dem_query", icon_value=icons_dict["raster"].icon_id)
 
-class VIEW3D_PT_gis_goto(bpy.types.Panel):
-	bl_label = "Go to Location"
-	bl_idname = "VIEW3D_PT_gis_goto"
+# GEOSCENE_PT_georef is registered as sub-panel (bl_parent_id) via geoscene.py
+
+class VIEW3D_PT_gis_search(bpy.types.Panel):
+	bl_label = "Search"
+	bl_idname = "VIEW3D_PT_gis_search"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
 	bl_category = 'GIS'
+	bl_parent_id = "VIEW3D_PT_gis_map"
 	bl_order = 1
 
 	def draw(self, context):
@@ -235,7 +239,6 @@ class VIEW3D_PT_gis_goto(bpy.types.Panel):
 		row = layout.row(align=True)
 		row.prop(context.scene, 'gis_goto_query', text='')
 		row.operator("view3d.map_goto", icon='PLAY', text="")
-		# Show resolved location from last search
 		if context.scene.gis_goto_result:
 			box = layout.box()
 			col = box.column(align=True)
@@ -245,7 +248,6 @@ class VIEW3D_PT_gis_goto(bpy.types.Panel):
 				col.label(text=parts[0], icon='PINNED')
 			if len(parts) > 1:
 				col.label(text=', '.join(parts[1:]))
-		# Search history
 		import sys
 		_mv = sys.modules.get(__package__ + '.operators.view3d_mapviewer')
 		if _mv:
@@ -257,113 +259,14 @@ class VIEW3D_PT_gis_goto(bpy.types.Panel):
 					op = col.operator("view3d.map_goto_history", text=q, icon='DOT')
 					op.index = i
 
-class VIEW3D_PT_gis_import(bpy.types.Panel):
-	bl_label = "Import"
-	bl_idname = "VIEW3D_PT_gis_import"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 2
-
-	def draw(self, context):
-		layout = self.layout
-		if IMPORT_SHP:
-			layout.operator("importgis.shapefile_file_dialog", icon_value=icons_dict["shp"].icon_id, text='Shapefile (.shp)')
-		if IMPORT_GEORASTER:
-			layout.operator("importgis.georaster", icon_value=icons_dict["raster"].icon_id, text="Georeferenced raster")
-		if IMPORT_OSM:
-			layout.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="OpenStreetMap (.osm)")
-		if IMPORT_GEOJSON:
-			layout.operator("importgis.geojson_file", icon='FILE', text="GeoJSON (.geojson)")
-		if IMPORT_GPX:
-			row = layout.row(align=True)
-			row.operator("importgis.gpx_file", icon='CURVE_PATH', text="GPX Track (.gpx)")
-			import sys
-			_gpx = sys.modules.get(__package__ + '.operators.io_import_gpx')
-			overlay_active = _gpx and _gpx._draw_handler is not None
-			row.operator("importgis.gpx_overlay_toggle", icon='OVERLAY' if overlay_active else 'GHOST_DISABLED', text="")
-		if IMPORT_ASC:
-			layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
-
-class VIEW3D_PT_gis_export(bpy.types.Panel):
-	bl_label = "Export"
-	bl_idname = "VIEW3D_PT_gis_export"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 3
-
-	def draw(self, context):
-		layout = self.layout
-		if EXPORT_SHP:
-			layout.operator('exportgis.shapefile', text="Shapefile (.shp)", icon_value=icons_dict["shp"].icon_id)
-
-class VIEW3D_PT_gis_camera(bpy.types.Panel):
-	bl_label = "Camera"
-	bl_idname = "VIEW3D_PT_gis_camera"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 4
-
-	def draw(self, context):
-		layout = self.layout
-		if CAM_GEOREF:
-			layout.operator("camera.georender", icon_value=icons_dict["georefCam"].icon_id, text='Georender')
-		if CAM_GEOPHOTO:
-			layout.operator("camera.geophotos", icon_value=icons_dict["exifCam"].icon_id, text='Geophotos')
-			layout.operator("camera.geophotos_setactive", icon='FILE_REFRESH')
-
-class VIEW3D_PT_gis_mesh(bpy.types.Panel):
-	bl_label = "Mesh"
-	bl_idname = "VIEW3D_PT_gis_mesh"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 5
-
-	def draw(self, context):
-		layout = self.layout
-		if DELAUNAY:
-			layout.operator("tesselation.delaunay", icon_value=icons_dict["delaunay"].icon_id, text='Delaunay')
-			layout.operator("tesselation.voronoi", icon_value=icons_dict["voronoi"].icon_id, text='Voronoi')
-		if EARTH_SPHERE:
-			layout.operator("earth.sphere", icon="WORLD", text='lonlat to sphere')
-			layout.operator("earth.curvature", icon_value=icons_dict["curve"].icon_id, text='Earth curvature correction')
-
-class VIEW3D_PT_gis_object(bpy.types.Panel):
-	bl_label = "Object"
-	bl_idname = "VIEW3D_PT_gis_object"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 6
-
-	def draw(self, context):
-		layout = self.layout
-		if DROP:
-			layout.operator("object.drop", icon_value=icons_dict["drop"].icon_id, text='Drop')
-
-class VIEW3D_PT_gis_nodes(bpy.types.Panel):
-	bl_label = "Nodes"
-	bl_idname = "VIEW3D_PT_gis_nodes"
-	bl_space_type = 'VIEW_3D'
-	bl_region_type = 'UI'
-	bl_category = 'GIS'
-	bl_order = 7
-
-	def draw(self, context):
-		layout = self.layout
-		if TERRAIN_NODES:
-			layout.operator("analysis.nodes", icon_value=icons_dict["terrain"].icon_id, text='Terrain analysis')
-
 class VIEW3D_PT_gis_shortcuts(bpy.types.Panel):
-	bl_label = "Map Viewer Shortcuts"
+	bl_label = "Shortcuts"
 	bl_idname = "VIEW3D_PT_gis_shortcuts"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
 	bl_category = 'GIS'
-	bl_order = 8
+	bl_parent_id = "VIEW3D_PT_gis_map"
+	bl_order = 2
 	bl_options = {'DEFAULT_CLOSED'}
 
 	def draw(self, context):
@@ -389,13 +292,142 @@ class VIEW3D_PT_gis_shortcuts(bpy.types.Panel):
 			row.label(text=key)
 			row.label(text=desc)
 
+# ─── Import ───────────────────────────────────────────────
+
+class VIEW3D_PT_gis_import(bpy.types.Panel):
+	bl_label = "Import"
+	bl_idname = "VIEW3D_PT_gis_import"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 1
+
+	def draw_header(self, context):
+		self.layout.label(icon='IMPORT')
+
+	def draw(self, context):
+		layout = self.layout
+		# Web queries in a box
+		box = layout.box()
+		box.label(text="Web", icon='URL')
+		row = box.row(align=True)
+		if IMPORT_OSM:
+			row.operator("importgis.osm_query", icon_value=icons_dict["osm"].icon_id, text="Get OSM")
+		if GET_DEM:
+			row.operator("importgis.dem_query", icon_value=icons_dict["raster"].icon_id, text="Get DEM")
+		# File imports in a box
+		box = layout.box()
+		box.label(text="File", icon='FILE_FOLDER')
+		col = box.column(align=True)
+		if IMPORT_SHP:
+			col.operator("importgis.shapefile_file_dialog", icon_value=icons_dict["shp"].icon_id, text='Shapefile (.shp)')
+		if IMPORT_GEORASTER:
+			col.operator("importgis.georaster", icon_value=icons_dict["raster"].icon_id, text="Georeferenced raster")
+		if IMPORT_OSM:
+			col.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="OpenStreetMap (.osm)")
+		if IMPORT_GEOJSON:
+			col.operator("importgis.geojson_file", icon='FILE', text="GeoJSON (.geojson)")
+		if IMPORT_GPX:
+			row = col.row(align=True)
+			row.operator("importgis.gpx_file", icon='CURVE_PATH', text="GPX Track (.gpx)")
+			import sys
+			_gpx = sys.modules.get(__package__ + '.operators.io_import_gpx')
+			overlay_active = _gpx and _gpx._draw_handler is not None
+			row.operator("importgis.gpx_overlay_toggle", icon='OVERLAY' if overlay_active else 'GHOST_DISABLED', text="")
+		if IMPORT_ASC:
+			col.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
+
+# ─── Export ───────────────────────────────────────────────
+
+class VIEW3D_PT_gis_export(bpy.types.Panel):
+	bl_label = "Export"
+	bl_idname = "VIEW3D_PT_gis_export"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 2
+
+	def draw_header(self, context):
+		self.layout.label(icon='EXPORT')
+
+	def draw(self, context):
+		layout = self.layout
+		if EXPORT_SHP:
+			layout.operator('exportgis.shapefile', text="Shapefile (.shp)", icon_value=icons_dict["shp"].icon_id)
+
+# ─── Parent: Tools ────────────────────────────────────────
+
+class VIEW3D_PT_gis_tools(bpy.types.Panel):
+	bl_label = "Tools"
+	bl_idname = "VIEW3D_PT_gis_tools"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_order = 3
+	bl_options = {'DEFAULT_CLOSED'}
+
+	def draw_header(self, context):
+		self.layout.label(icon='TOOL_SETTINGS')
+
+	def draw(self, context):
+		pass
+
+class VIEW3D_PT_gis_mesh(bpy.types.Panel):
+	bl_label = "Mesh"
+	bl_idname = "VIEW3D_PT_gis_mesh"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_parent_id = "VIEW3D_PT_gis_tools"
+
+	def draw(self, context):
+		layout = self.layout
+		if DELAUNAY:
+			layout.operator("tesselation.delaunay", icon_value=icons_dict["delaunay"].icon_id, text='Delaunay')
+			layout.operator("tesselation.voronoi", icon_value=icons_dict["voronoi"].icon_id, text='Voronoi')
+		if DROP:
+			layout.operator("object.drop", icon_value=icons_dict["drop"].icon_id, text='Drop to Ground')
+		if EARTH_SPHERE:
+			layout.operator("earth.sphere", icon="WORLD", text='lonlat to sphere')
+			layout.operator("earth.curvature", icon_value=icons_dict["curve"].icon_id, text='Earth curvature correction')
+
+class VIEW3D_PT_gis_camera(bpy.types.Panel):
+	bl_label = "Camera"
+	bl_idname = "VIEW3D_PT_gis_camera"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_parent_id = "VIEW3D_PT_gis_tools"
+	bl_options = {'DEFAULT_CLOSED'}
+
+	def draw(self, context):
+		layout = self.layout
+		if CAM_GEOREF:
+			layout.operator("camera.georender", icon_value=icons_dict["georefCam"].icon_id, text='Georender')
+		if CAM_GEOPHOTO:
+			layout.operator("camera.geophotos", icon_value=icons_dict["exifCam"].icon_id, text='Geophotos')
+			layout.operator("camera.geophotos_setactive", icon='FILE_REFRESH')
+
+class VIEW3D_PT_gis_analysis(bpy.types.Panel):
+	bl_label = "Analysis"
+	bl_idname = "VIEW3D_PT_gis_analysis"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = 'GIS'
+	bl_parent_id = "VIEW3D_PT_gis_tools"
+
+	def draw(self, context):
+		layout = self.layout
+		if TERRAIN_NODES:
+			layout.operator("analysis.nodes", icon_value=icons_dict["terrain"].icon_id, text='Terrain analysis')
+
 class VIEW3D_PT_gis_settings(bpy.types.Panel):
 	bl_label = "Settings"
 	bl_idname = "VIEW3D_PT_gis_settings"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
 	bl_category = 'GIS'
-	bl_order = 9
+	bl_parent_id = "VIEW3D_PT_gis_tools"
 	bl_options = {'DEFAULT_CLOSED'}
 
 	def draw(self, context):
@@ -404,15 +436,15 @@ class VIEW3D_PT_gis_settings(bpy.types.Panel):
 		layout.operator("bgis.logs", icon='TEXT', text='Show Logs')
 
 panels = [
-	VIEW3D_PT_gis_webgeodata,
-	VIEW3D_PT_gis_goto,
+	VIEW3D_PT_gis_map,
+	VIEW3D_PT_gis_search,
+	VIEW3D_PT_gis_shortcuts,
 	VIEW3D_PT_gis_import,
 	VIEW3D_PT_gis_export,
-	VIEW3D_PT_gis_camera,
+	VIEW3D_PT_gis_tools,
 	VIEW3D_PT_gis_mesh,
-	VIEW3D_PT_gis_object,
-	VIEW3D_PT_gis_nodes,
-	VIEW3D_PT_gis_shortcuts,
+	VIEW3D_PT_gis_camera,
+	VIEW3D_PT_gis_analysis,
 	VIEW3D_PT_gis_settings,
 ]
 
@@ -428,7 +460,6 @@ def register():
 
 	#operators
 	prefs.register()
-	geoscene.register()
 
 	for panel in panels:
 		try:
@@ -437,6 +468,8 @@ def register():
 			logger.warning('{} is already registered, now unregister and retry... '.format(panel))
 			bpy.utils.unregister_class(panel)
 			bpy.utils.register_class(panel)
+
+	geoscene.register()
 
 	bpy.utils.register_class(BGIS_OT_logs)
 
@@ -506,13 +539,14 @@ def unregister():
 				if 'view3d.map_start' in km.keymap_items:
 					kmi = km.keymap_items.remove(km.keymap_items['view3d.map_start'])
 
+	geoscene.unregister()
+
 	for panel in panels:
 		bpy.utils.unregister_class(panel)
 
 	bpy.utils.unregister_class(BGIS_OT_logs)
 
 	prefs.unregister()
-	geoscene.unregister()
 	if BASEMAPS:
 		view3d_mapviewer.unregister()
 	if IMPORT_GEORASTER:
