@@ -267,6 +267,17 @@ class BGIS_PREFS(AddonPreferences):
 		update = updateMapTilerApiKey
 	)
 
+	cdse_client_id: StringProperty(
+		name = "",
+		description = "Copernicus Data Space OAuth2 Client ID (register free at dataspace.copernicus.eu)"
+	)
+
+	cdse_client_secret: StringProperty(
+		name = "",
+		description = "Copernicus Data Space OAuth2 Client Secret",
+		subtype = 'PASSWORD'
+	)
+
 	################
 	#IO options
 	mergeDoubles: BoolProperty(
@@ -361,6 +372,17 @@ class BGIS_PREFS(AddonPreferences):
 		row = box.row().split(factor=0.2)
 		row.label(text="MapTiler API Key")
 		row.prop(self, "maptiler_api_key")
+
+		#CDSE
+		box2 = box.box()
+		box2.label(text="Copernicus CDSE (Sentinel-2, commercial use OK)", icon='WORLD_DATA')
+		row = box2.row().split(factor=0.2)
+		row.label(text="Client ID")
+		row.prop(self, "cdse_client_id")
+		row = box2.row().split(factor=0.2)
+		row.label(text="Client Secret")
+		row.prop(self, "cdse_client_secret")
+		box2.label(text="Register free at dataspace.copernicus.eu → Dashboard → OAuth clients", icon='INFO')
 
 		#System
 		box = layout.box()

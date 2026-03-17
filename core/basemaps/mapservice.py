@@ -26,6 +26,8 @@ import threading
 import queue
 import time
 import urllib.request
+import urllib.parse
+import urllib.error
 import http.client
 import ssl
 from urllib.parse import urlparse
@@ -45,6 +47,107 @@ from .. import settings
 USER_AGENT = settings.user_agent
 
 TIMEOUT = 4
+
+import json
+
+####################################
+# CDSE (Copernicus Data Space) OAuth2 Token Manager
+####################################
+
+class CDSEAuth():
+	"""
+	Handles OAuth2 client_credentials flow for Copernicus Data Space Ecosystem.
+	Tokens are cached and refreshed automatically.
+	"""
+
+	TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+
+	def __init__(self):
+		self._token = None
+		self._expires_at = 0
+		self._lock = threading.Lock()
+		self._client_id = ''
+		self._client_secret = ''
+
+	def load_credentials(self):
+		"""Read CDSE credentials from Blender addon preferences.
+		Must be called from the main thread (before tile downloads start)."""
+		try:
+			import bpy
+			pkg = __package__.split('.')[0]
+			prefs = bpy.context.preferences.addons[pkg].preferences
+			self._client_id = prefs.cdse_client_id
+			self._client_secret = prefs.cdse_client_secret
+			if self._client_id and self._client_secret:
+				log.debug("CDSE credentials loaded successfully")
+			else:
+				log.warning("CDSE credentials empty — set them in BlenderGIS Preferences")
+		except Exception as e:
+			log.error("Failed to load CDSE credentials: {}".format(e))
+
+	def get_token(self):
+		"""Return a valid Bearer token, refreshing if needed."""
+		with self._lock:
+			if self._token and time.time() < self._expires_at - 30:
+				return self._token
+
+			client_id, client_secret = self._client_id, self._client_secret
+			if not client_id or not client_secret:
+				log.error("CDSE credentials not configured. Set them in BlenderGIS Preferences.")
+				return None
+
+			try:
+				data = urllib.parse.urlencode({
+					'grant_type': 'client_credentials',
+					'client_id': client_id,
+					'client_secret': client_secret,
+				}).encode('utf-8')
+
+				req = urllib.request.Request(self.TOKEN_URL, data=data, method='POST')
+				req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+
+				ctx = ssl.create_default_context()
+				with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+					result = json.loads(resp.read().decode('utf-8'))
+
+				self._token = result['access_token']
+				self._expires_at = time.time() + result.get('expires_in', 300)
+				log.debug("CDSE token obtained, expires in {}s".format(result.get('expires_in', '?')))
+				return self._token
+
+			except Exception as e:
+				log.error("Failed to get CDSE token: {}".format(e))
+				self._token = None
+				return None
+
+# Singleton
+_cdse_auth = CDSEAuth()
+
+# Evalscript for Sentinel-2 true color
+CDSE_EVALSCRIPT = """//VERSION=3
+function setup() {
+  return {
+    input: ["B02", "B03", "B04", "dataMask"],
+    output: { bands: 4 }
+  };
+}
+function evaluatePixel(s) {
+  let gain = 2.5;
+  return [gain * s.B04, gain * s.B03, gain * s.B02, s.dataMask];
+}"""
+
+# Evalscript for Sentinel-2 Quarterly Cloudless Mosaic
+CDSE_MOSAIC_EVALSCRIPT = """//VERSION=3
+function setup() {
+  return {
+    input: ["B02", "B03", "B04"],
+    output: { bands: 3, sampleType: "AUTO" }
+  };
+}
+function evaluatePixel(s) {
+  let gain = 2.5;
+  return [gain * s.B04, gain * s.B03, gain * s.B02];
+}"""
 
 # Set mosaic backgroung image color, it will be the base color for area not covered
 # by the map service (ie when requests return non valid data)
@@ -527,6 +630,10 @@ class MapService():
 		#HTTP connection pool for persistent keep-alive connections
 		self._connPool = _ConnectionPool(timeout=TIMEOUT)
 
+		#Load CDSE credentials from main thread if needed
+		if self.service == 'CDSE':
+			_cdse_auth.load_credentials()
+
 	def reportLoop(self):
 		msg = self.report
 		while self.running:
@@ -635,6 +742,10 @@ class MapService():
 			url = url.replace("{Y}", str(row))
 			url = url.replace("{Z}", str(zoom))
 
+		if self.service == 'CDSE':
+			# CDSE uses Process API (POST), URL is just the endpoint
+			return self.urlTemplate
+
 		if self.service == 'WMS':
 			url = self.urlTemplate['BASE_URL']
 			if url[-1] != '?' :
@@ -693,6 +804,10 @@ class MapService():
 		Return None if unable to download a valid stream.
 		"""
 
+		# CDSE Process API: POST with bbox instead of GET with URL
+		if self.service == 'CDSE':
+			return self._downloadTileCDSE(laykey, col, row, zoom)
+
 		url = self.buildUrl(laykey, col, row, zoom)
 		log.debug(url)
 
@@ -713,6 +828,82 @@ class MapService():
 			log.debug("Invalid tile data for request {}".format(url))
 
 		return data
+
+
+	def _downloadTileCDSE(self, laykey, col, row, zoom):
+		"""
+		Download a tile from CDSE Sentinel Hub Process API.
+		Converts tile z/x/y to EPSG:3857 bbox and POSTs request.
+		"""
+		# CDSE rejects requests coarser than 1500 m/pixel
+		lay = self.layers[laykey]
+		if zoom < lay.zmin:
+			return None
+
+		token = _cdse_auth.get_token()
+		if not token:
+			return None
+
+		tm = self.srcTms
+		xmin, ymin, xmax, ymax = tm.getTileBbox(col, row, zoom)
+
+		lay = self.layers[laykey]
+		data_type = lay.urlKey  # e.g. 'sentinel-2-l2a' or 'byoc-...'
+		time_range = getattr(lay, 'timeRange', {"from": "2024-01-01T00:00:00Z", "to": "2099-12-31T00:00:00Z"})
+		evalscript = getattr(lay, 'evalscript', CDSE_EVALSCRIPT)
+
+		body = {
+			"input": {
+				"bounds": {
+					"properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/3857"},
+					"bbox": [xmin, ymin, xmax, ymax]
+				},
+				"data": [{
+					"type": data_type,
+					"dataFilter": {
+						"timeRange": time_range,
+						"maxCloudCoverage": 20,
+						"mosaickingOrder": "leastCC"
+					}
+				}]
+			},
+			"output": {
+				"width": tm.tileSize,
+				"height": tm.tileSize,
+				"responses": [{"identifier": "default", "format": {"type": "image/jpeg", "quality": 90}}]
+			},
+			"evalscript": evalscript
+		}
+
+		try:
+			payload = json.dumps(body).encode('utf-8')
+			req = urllib.request.Request(
+				self.urlTemplate,
+				data=payload,
+				method='POST'
+			)
+			req.add_header('Authorization', 'Bearer ' + token)
+			req.add_header('Content-Type', 'application/json')
+			req.add_header('Accept', 'image/jpeg')
+
+			ctx = ssl.create_default_context()
+			with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+				data = resp.read()
+
+			# Validate image data
+			if data and imghdr.what(None, data) is not None:
+				return data
+			else:
+				log.debug("CDSE returned non-image data for tile z{} x{} y{}".format(zoom, col, row))
+				return None
+
+		except urllib.error.HTTPError as e:
+			body = e.read().decode('utf-8', errors='replace')[:200]
+			log.error("CDSE HTTP {} for tile z{} x{} y{}: {}".format(e.code, zoom, col, row, body))
+			return None
+		except Exception as e:
+			log.error("CDSE download error for tile z{} x{} y{}: {}".format(zoom, col, row, e))
+			return None
 
 
 	def tileRequest(self, laykey, col, row, zoom, toDstGrid=True):

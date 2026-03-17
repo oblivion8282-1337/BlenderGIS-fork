@@ -207,23 +207,102 @@ SOURCES = {
 	},
 
 
-	"EOX_S2" : {
-		"name" : 'EOX Sentinel-2',
-		"description" : 'Sentinel-2 cloudless by EOX (CC BY-NC-SA 4.0)',
+	# EOX Sentinel-2 2016: CC BY 4.0 — free for commercial use (film, etc.)
+	"EOX_S2_FREE" : {
+		"name" : 'EOX Sentinel-2 (commercial OK)',
+		"description" : 'Sentinel-2 cloudless 2016 by EOX — CC BY 4.0, free for commercial use',
 		"service": 'TMS',
 		"grid": 'WM',
 		"quadTree": False,
 		"layers" : {
-			"S2_2024" : {"urlKey" : 's2cloudless-2024_3857', "name" : '2024', "description" : 'Sentinel-2 cloudless 2024', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2023" : {"urlKey" : 's2cloudless-2023_3857', "name" : '2023', "description" : 'Sentinel-2 cloudless 2023', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2022" : {"urlKey" : 's2cloudless-2022_3857', "name" : '2022', "description" : 'Sentinel-2 cloudless 2022', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2021" : {"urlKey" : 's2cloudless-2021_3857', "name" : '2021', "description" : 'Sentinel-2 cloudless 2021', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2020" : {"urlKey" : 's2cloudless-2020_3857', "name" : '2020', "description" : 'Sentinel-2 cloudless 2020', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2019" : {"urlKey" : 's2cloudless-2019_3857', "name" : '2019', "description" : 'Sentinel-2 cloudless 2019', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
-			"S2_2018" : {"urlKey" : 's2cloudless-2018_3857', "name" : '2018', "description" : 'Sentinel-2 cloudless 2018', "format" : 'jpeg', "zmin" : 0, "zmax" : 21}
+			"S2_2016" : {"urlKey" : 's2cloudless_3857', "name" : '2016 (CC BY 4.0)', "description" : 'Sentinel-2 cloudless 2016 — commercial use OK with attribution', "format" : 'jpeg', "zmin" : 0, "zmax" : 21}
 		},
 		"urlTemplate": "https://tiles.maps.eox.at/wmts/1.0.0/{LAY}/default/g/{Z}/{Y}/{X}.jpg",
 		"referer": "https://s2maps.eu"
+	},
+
+
+	# EOX Sentinel-2 2018-2024: CC BY-NC-SA 4.0 — NON-COMMERCIAL only
+	"EOX_S2" : {
+		"name" : 'EOX Sentinel-2 (non-commercial)',
+		"description" : 'Sentinel-2 cloudless by EOX — CC BY-NC-SA 4.0, non-commercial only',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"S2_2024" : {"urlKey" : 's2cloudless-2024_3857', "name" : '2024', "description" : 'Sentinel-2 cloudless 2024 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2023" : {"urlKey" : 's2cloudless-2023_3857', "name" : '2023', "description" : 'Sentinel-2 cloudless 2023 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2022" : {"urlKey" : 's2cloudless-2022_3857', "name" : '2022', "description" : 'Sentinel-2 cloudless 2022 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2021" : {"urlKey" : 's2cloudless-2021_3857', "name" : '2021', "description" : 'Sentinel-2 cloudless 2021 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2020" : {"urlKey" : 's2cloudless-2020_3857', "name" : '2020', "description" : 'Sentinel-2 cloudless 2020 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2019" : {"urlKey" : 's2cloudless-2019_3857', "name" : '2019', "description" : 'Sentinel-2 cloudless 2019 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21},
+			"S2_2018" : {"urlKey" : 's2cloudless-2018_3857', "name" : '2018', "description" : 'Sentinel-2 cloudless 2018 (non-commercial)', "format" : 'jpeg', "zmin" : 0, "zmax" : 21}
+		},
+		"urlTemplate": "https://tiles.maps.eox.at/wmts/1.0.0/{LAY}/default/g/{Z}/{Y}/{X}.jpg",
+		"referer": "https://s2maps.eu"
+	},
+
+
+	# Copernicus CDSE: Sentinel-2 via Process API — free for commercial use
+	# Requires free registration at dataspace.copernicus.eu + OAuth2 credentials in preferences
+	"CDSE_S2" : {
+		"name" : 'Copernicus Sentinel-2 (commercial OK)',
+		"description" : 'Sentinel-2 L2A via CDSE Process API — free for commercial use, updated every 2-3 days',
+		"service": 'CDSE',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"TRUE_COLOR" : {"urlKey" : 'sentinel-2-l2a', "name" : 'True Color (latest)', "description" : 'Most recent low-cloud Sentinel-2 image — commercial use OK', "format" : 'jpeg', "zmin" : 7, "zmax" : 14},
+			"MOSAIC_Q" : {"urlKey" : 'byoc-5460de54-082e-473a-b6ea-d5cbe3c17cca', "name" : 'Quarterly Cloudless Mosaic', "description" : 'Cloud-free quarterly composite — commercial use OK', "format" : 'jpeg', "zmin" : 7, "zmax" : 14}
+		},
+		"urlTemplate": "https://sh.dataspace.copernicus.eu/api/v1/process",
+		"referer": "https://dataspace.copernicus.eu"
+	},
+
+
+	# NASA GIBS: public domain — free for any use including commercial
+	"NASA_GIBS" : {
+		"name" : 'NASA GIBS (commercial OK)',
+		"description" : 'NASA Global Imagery Browse Services — public domain, free for all use',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"MODIS_TERRA" : {"urlKey" : 'MODIS_Terra_CorrectedReflectance_TrueColor', "name" : 'MODIS Terra True Color', "description" : 'Daily satellite imagery (250m) — public domain', "format" : 'jpeg', "zmin" : 0, "zmax" : 9},
+			"MODIS_AQUA" : {"urlKey" : 'MODIS_Aqua_CorrectedReflectance_TrueColor', "name" : 'MODIS Aqua True Color', "description" : 'Daily satellite imagery (250m) — public domain', "format" : 'jpeg', "zmin" : 0, "zmax" : 9},
+			"VIIRS" : {"urlKey" : 'VIIRS_SNPP_CorrectedReflectance_TrueColor', "name" : 'VIIRS SNPP True Color', "description" : 'Daily satellite imagery (250m) — public domain', "format" : 'jpeg', "zmin" : 0, "zmax" : 9}
+		},
+		"urlTemplate": "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/{LAY}/default/2024-06-15/GoogleMapsCompatible_Level9/{Z}/{Y}/{X}.jpg",
+		"referer": "https://earthdata.nasa.gov"
+	},
+
+
+	# Spanish PNOA: CC BY 4.0 — free for commercial use, 25cm resolution
+	# Covers all of Spain including Canary Islands, no API key required
+	"PNOA" : {
+		"name" : 'Spain PNOA (commercial OK)',
+		"description" : 'Spanish national orthophotos 25cm — CC BY 4.0, free for commercial use',
+		"service": 'WMTS',
+		"grid": 'WM',
+		"matrix" : 'GoogleMapsCompatible',
+		"layers" : {
+			"ORTHO" : {"urlKey" : 'OI.OrthoimageCoverage', "name" : 'Orthophotos', "description" : 'PNOA aerial orthophotos 25cm + Sentinel-2 at low zoom — CC BY 4.0',
+				"format" : 'jpeg', "style" : 'default', "zmin" : 0, "zmax" : 20}
+		},
+		"urlTemplate": {
+			"BASE_URL" : 'https://www.ign.es/wmts/pnoa-ma?',
+			"SERVICE" : 'WMTS',
+			"VERSION" : '1.0.0',
+			"REQUEST" : 'GetTile',
+			"LAYER" : '{LAY}',
+			"STYLE" : '{STYLE}',
+			"FORMAT" : 'image/{FORMAT}',
+			"TILEMATRIXSET" : '{MATRIX}',
+			"TILEMATRIX" : '{Z}',
+			"TILEROW" : '{Y}',
+			"TILECOL" : '{X}'
+			},
+		"referer": "https://www.ign.es"
 	},
 
 
