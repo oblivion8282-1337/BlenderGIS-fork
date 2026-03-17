@@ -597,21 +597,17 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
 			return {'CANCELLED'}
 
-		# Auto-set UTM CRS from first coordinate
+		# Auto-set CRS from first coordinate
+		# Use EPSG:3857 (Web Mercator) instead of UTM to stay compatible with
+		# basemap tiles — avoids the need for GDAL raster reprojection.
 		first = _first_coord_gpx(gpx_data)
 		if first is None:
 			self.report({'ERROR'}, "GPX contains no usable coordinates")
 			return {'CANCELLED'}
 
 		if not geoscn.hasCRS:
-			lon, lat = first
-			try:
-				geoscn.crs = utm.lonlat_to_epsg(lon, lat)
-			except Exception:
-				log.error("Cannot auto-set UTM CRS", exc_info=True)
-				self.report({'ERROR'}, "Cannot auto-set UTM CRS from first coordinate")
-				return {'CANCELLED'}
-			log.info("Auto-set scene CRS to %s", geoscn.crs)
+			geoscn.crs = 'EPSG:3857'
+			log.info("Auto-set scene CRS to EPSG:3857 (Web Mercator)")
 
 		if not geoscn.hasOriginPrj:
 			lon, lat = first
