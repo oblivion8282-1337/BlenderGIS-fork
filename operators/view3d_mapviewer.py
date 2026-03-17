@@ -1172,6 +1172,21 @@ class VIEW3D_OT_map_viewer(Operator):
 				bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
 				context.area.header_text_set(None)
 
+				# Remove any existing EXPORT_ meshes to avoid stacking
+				for old_obj in list(context.scene.objects):
+					if old_obj.type == 'MESH' and old_obj.name.startswith('EXPORT_'):
+						old_mesh = old_obj.data
+						old_mats = [m for m in old_mesh.materials if m]
+						bpy.data.objects.remove(old_obj, do_unlink=True)
+						bpy.data.meshes.remove(old_mesh, do_unlink=True)
+						for m in old_mats:
+							if m.users == 0:
+								bpy.data.materials.remove(m)
+				# Also remove old EXPORT_ images
+				for old_img in list(bpy.data.images):
+					if old_img.name.startswith('EXPORT_') and old_img.users == 0:
+						bpy.data.images.remove(old_img)
+
 				#Copy image to new datablock
 				bpyImg = bpy.data.images.load(self.map.imgPath) #(self.map.img.filepath)
 				name = 'EXPORT_' + self.map.srckey + '_' + self.map.laykey + '_' + self.map.grdkey
