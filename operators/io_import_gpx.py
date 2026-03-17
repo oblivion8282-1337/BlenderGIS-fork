@@ -13,6 +13,10 @@ from ..geoscene import GeoScene
 from ..core.proj import Reproj, reprojPt, utm
 from .utils import adjust3Dview, getBBOX
 
+import gpu
+from gpu_extras.batch import batch_for_shader
+from bpy_extras.view3d_utils import location_3d_to_region_2d
+
 PKG, SUBPKG = __package__.split('.', maxsplit=1)
 
 # GPX XML namespace
@@ -889,6 +893,9 @@ class IMPORTGIS_OT_gpx_file(Operator):
 		self.report({'INFO'}, msg)
 		log.info(msg)
 
+		# Enable GPU overlay for route visibility on basemap
+		gpx_overlay_ensure()
+
 		# --- Auto-load basemap --------------------------------------------------
 		if self.autoBasemap:
 			bb = _gpx_bbox(gpx_data)
@@ -926,6 +933,87 @@ class IMPORTGIS_OT_gpx_file(Operator):
 
 
 # ---------------------------------------------------------------------------
+# GPX Route Overlay (GPU draw handler)
+# ---------------------------------------------------------------------------
+
+_draw_handler = None
+
+
+def _draw_gpx_overlay():
+	"""Draw all GPX routes as thick colored lines on top of the viewport."""
+	context = bpy.context
+	if context.area is None or context.area.type != 'VIEW_3D':
+		return
+
+	region = context.region
+	rv3d = context.space_data.region_3d
+	if region is None or rv3d is None:
+		return
+
+	# Collect screen-space line segments from all GPX track/route objects
+	segments = []  # list of lists of 2D points per track
+	for obj in context.scene.objects:
+		if obj.get('gpx_type') not in ('track', 'route'):
+			continue
+		if obj.hide_get() or not obj.visible_get():
+			continue
+
+		mesh = obj.data
+		if not mesh.vertices:
+			continue
+
+		# Get vertex positions in world space, project to 2D
+		mw = obj.matrix_world
+		pts_2d = []
+		for v in mesh.vertices:
+			co_3d = mw @ v.co
+			co_2d = location_3d_to_region_2d(region, rv3d, co_3d)
+			if co_2d is not None:
+				pts_2d.append(co_2d)
+
+		if len(pts_2d) >= 2:
+			segments.append(pts_2d)
+
+	if not segments:
+		return
+
+	# Draw using GPU shader
+	shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+	gpu.state.blend_set('ALPHA')
+	gpu.state.line_width_set(4.0)
+
+	for pts_2d in segments:
+		coords = [(p[0], p[1]) for p in pts_2d]
+		indices = [(i, i + 1) for i in range(len(coords) - 1)]
+		batch = batch_for_shader(shader, 'LINES', {"pos": coords}, indices=indices)
+		shader.bind()
+		shader.uniform_float("color", (1.0, 0.3, 0.0, 0.9))  # orange
+		batch.draw(shader)
+
+	gpu.state.line_width_set(1.0)
+	gpu.state.blend_set('NONE')
+
+
+def gpx_overlay_ensure():
+	"""Register the GPX overlay draw handler if not already active."""
+	global _draw_handler
+	if _draw_handler is not None:
+		return
+	_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+		_draw_gpx_overlay, (), 'WINDOW', 'POST_PIXEL')
+	log.info("GPX overlay draw handler registered")
+
+
+def gpx_overlay_remove():
+	"""Remove the GPX overlay draw handler."""
+	global _draw_handler
+	if _draw_handler is not None:
+		bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, 'WINDOW')
+		_draw_handler = None
+		log.info("GPX overlay draw handler removed")
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -942,8 +1030,15 @@ def register():
 			log.warning('%s is already registered, now unregister and retry...', cls)
 			bpy.utils.unregister_class(cls)
 			bpy.utils.register_class(cls)
+	# Enable overlay if GPX routes already exist in scene
+	try:
+		if any(obj.get('gpx_type') in ('track', 'route') for obj in bpy.data.objects):
+			gpx_overlay_ensure()
+	except Exception:
+		pass  # bpy.data not yet available during startup
 
 
 def unregister():
+	gpx_overlay_remove()
 	for cls in classes:
 		bpy.utils.unregister_class(cls)
