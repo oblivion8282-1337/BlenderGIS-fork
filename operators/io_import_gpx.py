@@ -270,6 +270,11 @@ def _get_or_create_route_geonodes():
 	s_prof.min_value = 0
 	s_prof.max_value = 1
 	s_prof.description = "0 = Flat Band, 1 = Tube"
+	s_merge = ng.interface.new_socket('Merge Dist', in_out='INPUT', socket_type='NodeSocketFloat')
+	s_merge.default_value = 2.5
+	s_merge.min_value = 0.0
+	s_merge.max_value = 50.0
+	s_merge.description = "Merge overlapping vertices at corners (half-width recommended)"
 	ng.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
 
 	nodes = ng.nodes
@@ -390,11 +395,11 @@ def _get_or_create_route_geonodes():
 	smooth.location = (400, 0)
 	links.new(c2m.outputs['Mesh'], smooth.inputs['Geometry'])
 
-	# Merge by Distance (clean up)
+	# Merge by Distance — clean up overlapping faces at corners
 	merge = nodes.new('GeometryNodeMergeByDistance')
 	merge.location = (600, 0)
-	merge.inputs['Distance'].default_value = 0.01
 	links.new(smooth.outputs['Geometry'], merge.inputs['Geometry'])
+	links.new(inp.outputs['Merge Dist'], merge.inputs['Distance'])
 
 	links.new(merge.outputs['Geometry'], out.inputs['Geometry'])
 
@@ -429,6 +434,8 @@ def _apply_route_geonodes(obj, width=3.0, resolution=2.0, profile=0, terrain_obj
 			mod[item.identifier] = resolution
 		elif item.name == 'Profile':
 			mod[item.identifier] = profile
+		elif item.name == 'Merge Dist':
+			mod[item.identifier] = width * 0.5
 
 	# Material
 	mat = _get_or_create_route_material()
