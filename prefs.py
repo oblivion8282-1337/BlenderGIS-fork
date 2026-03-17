@@ -25,6 +25,54 @@ def getAppData():
 
 APP_DATA = getAppData()
 
+# ---------------------------------------------------------------------------
+# Persistent credentials storage (survives addon reload / Blender restart)
+# ---------------------------------------------------------------------------
+CREDENTIALS_FILE = os.path.join(APP_DATA, 'credentials.json')
+
+# Keys in credentials.json that map to addon preference properties
+_CREDENTIAL_KEYS = [
+	'opentopography_api_key',
+	'maptiler_api_key',
+	'cdse_client_id',
+	'cdse_client_secret',
+]
+
+def _load_credentials():
+	"""Load credentials from ~/.bgis/credentials.json, return dict."""
+	if not os.path.isfile(CREDENTIALS_FILE):
+		return {}
+	try:
+		with open(CREDENTIALS_FILE, 'r', encoding='utf-8') as f:
+			return json.load(f)
+	except Exception:
+		log.warning('Failed to load credentials file', exc_info=True)
+		return {}
+
+def _save_credentials(data):
+	"""Save credentials dict to ~/.bgis/credentials.json."""
+	try:
+		with open(CREDENTIALS_FILE, 'w', encoding='utf-8') as f:
+			json.dump(data, f, indent=2)
+	except Exception:
+		log.error('Failed to save credentials file', exc_info=True)
+
+def _sync_credential(prop_name, value):
+	"""Update a single key in the credentials file."""
+	data = _load_credentials()
+	if data.get(prop_name) != value:
+		data[prop_name] = value
+		_save_credentials(data)
+
+def restore_credentials(prefs):
+	"""Restore credentials from file into addon preferences (called on register)."""
+	data = _load_credentials()
+	for key in _CREDENTIAL_KEYS:
+		val = data.get(key, '')
+		if val and not getattr(prefs, key, ''):
+			setattr(prefs, key, val)
+			log.info('Restored credential: %s', key)
+
 '''
 Default Enum properties contents (list of tuple (value, label, tootip))
 Theses properties are automatically filled from a serialized json string stored in a StringProperty
@@ -253,13 +301,18 @@ class BGIS_PREFS(AddonPreferences):
 		items = listDemServer
 		)
 
+	def updateOpentopoKey(self, context):
+		_sync_credential('opentopography_api_key', self.opentopography_api_key)
+
 	opentopography_api_key: StringProperty(
 		name = "",
-		description="you need to register and request a key from opentopography website"
+		description="you need to register and request a key from opentopography website",
+		update = updateOpentopoKey
 	)
 
 	def updateMapTilerApiKey(self, context):
 		settings.maptiler_api_key = self.maptiler_api_key
+		_sync_credential('maptiler_api_key', self.maptiler_api_key)
 
 	maptiler_api_key: StringProperty(
 		name = "",
@@ -267,15 +320,23 @@ class BGIS_PREFS(AddonPreferences):
 		update = updateMapTilerApiKey
 	)
 
+	def updateCdseClientId(self, context):
+		_sync_credential('cdse_client_id', self.cdse_client_id)
+
 	cdse_client_id: StringProperty(
 		name = "",
-		description = "Copernicus Data Space OAuth2 Client ID (register free at dataspace.copernicus.eu)"
+		description = "Copernicus Data Space OAuth2 Client ID (register free at dataspace.copernicus.eu)",
+		update = updateCdseClientId
 	)
+
+	def updateCdseClientSecret(self, context):
+		_sync_credential('cdse_client_secret', self.cdse_client_secret)
 
 	cdse_client_secret: StringProperty(
 		name = "",
 		description = "Copernicus Data Space OAuth2 Client Secret",
-		subtype = 'PASSWORD'
+		subtype = 'PASSWORD',
+		update = updateCdseClientSecret
 	)
 
 	################
@@ -917,6 +978,9 @@ def register():
 	prefs = bpy.context.preferences.addons[PKG].preferences
 	if prefs.cacheFolder == '':
 		prefs.cacheFolder = APP_DATA
+
+	# Restore API keys / credentials from persistent file
+	restore_credentials(prefs)
 
 
 def unregister():
