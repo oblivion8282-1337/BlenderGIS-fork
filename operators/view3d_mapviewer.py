@@ -78,18 +78,19 @@ _export_pending = False
 #Flag: N-Panel "Exit" button was clicked while map viewer is running
 _exit_pending = False
 
-#Flag: N-Panel "Lock Zoom" toggle was clicked
-_lock_zoom_pending = False
-
-#State: whether zoom is currently locked (for N-Panel display)
-_zoom_locked = False
+#Flag: N-Panel source/layer was changed while map viewer is running
+_source_change_pending = False
 
 #Info overlay data — updated by operator, read by persistent draw handler
 _overlay_zoom = 0
 _overlay_lat = 0.0
 _overlay_lon = 0.0
 _overlay_scale = 1
-_overlay_locked = False
+_overlay_detail_offset = 0
+_overlay_export_tiles = 0
+
+#Flag: N-Panel detail offset was changed while map viewer is running
+_detail_changed_pending = False
 
 ####################
 
@@ -141,8 +142,6 @@ class BaseMap(GeoScene):
 		if not self.hasZoom:
 			self.zoom = 0
 
-		self.lockedZoom = None
-
 		#Set path to tiles mosaic used as background image in Blender
 		#We need a format that support transparency so jpg is exclude
 		#Writing to tif is generally faster than writing to png
@@ -181,6 +180,11 @@ class BaseMap(GeoScene):
 		self._req_area_width = self.area.width
 		self._req_area_height = self.area.height
 		self._req_view_location = tuple(self.reg3d.view_location)
+		#Cache effective detail offset (scene property, not thread-safe)
+		try:
+			self._detail_offset = self.scn.gis_basemap.detail_offset
+		except Exception:
+			self._detail_offset = 0
 		self.srv.start()
 		self.thread = threading.Thread(target=self.run)
 		self.thread.start()
@@ -213,10 +217,15 @@ class BaseMap(GeoScene):
 		#Get area dimension (use cached values from get() for thread safety)
 		w, h = self._req_area_width, self._req_area_height
 
-		#Get area bbox coords in destination tile matrix crs (map origin is bottom left)
+		#Compute effective tile zoom (navigation zoom + detail offset)
+		detail = getattr(self, '_detail_offset', 0)
+		tile_zoom = self.zoom + detail
+		tile_zoom = max(0, min(tile_zoom, self.tm.nbLevels - 1))
+		tile_zoom = max(self.layer.zmin, min(tile_zoom, self.layer.zmax))
 
-		#Method 1 : Get bbox coords in scene crs and then reproject the bbox if needed
-		z = self.lockedZoom if self.lockedZoom is not None else self.zoom
+		#Get area bbox coords in destination tile matrix crs (map origin is bottom left)
+		#BBox is computed from navigation zoom (what the user sees)
+		z = self.zoom
 		res = self.tm.getRes(z)
 		if self.crs == 'EPSG:4326':
 			res = meters2dd(res)
@@ -232,25 +241,15 @@ class BaseMap(GeoScene):
 		if self.crs != self.tm.CRS:
 			bbox = reprojBbox(self.crs, self.tm.CRS, bbox)
 
-		'''
-		#Method 2
-		bbox = getBBOX.fromTopView(self.context) #ERROR context is None ????
-		bbox = bbox.toGeo(geoscn=self)
-		if self.crs != self.tm.CRS:
-			bbox = reprojBbox(self.crs, self.tm.CRS, bbox)
-		'''
-
-		log.debug('Bounding box request : {}'.format(bbox))
-
-		#Stop thread if the request is same as previous
-		#TODO
+		log.debug('Bounding box request : {} (tile zoom: {})'.format(bbox, tile_zoom))
 
 		if self.srv.srcGridKey == self.grdkey:
 			toDstGrid = False
 		else:
 			toDstGrid = True
 
-		mosaic = self.srv.getImage(self.laykey, bbox, self.zoom, toDstGrid=toDstGrid, outCRS=self.crs)
+		#Fetch tiles at effective zoom (may differ from navigation zoom)
+		mosaic = self.srv.getImage(self.laykey, bbox, tile_zoom, toDstGrid=toDstGrid, outCRS=self.crs)
 
 		return mosaic
 
@@ -307,7 +306,7 @@ class BaseMap(GeoScene):
 		#Get 3d area's number of pixels and resulting size at the requested zoom level resolution
 		#dst =  max( [self.area3d.width, self.area3d.height] ) #WARN return [1,1] !!!!????
 		dst =  max( [self.area.width, self.area.height] )
-		z = self.lockedZoom if self.lockedZoom is not None else self.zoom
+		z = self.zoom
 		res = self.tm.getRes(z)
 		dst = dst * res / self.scale
 
@@ -337,7 +336,7 @@ class BaseMap(GeoScene):
 ####################################
 def drawInfosText(self, context):
 	"""Update header bar with essential status and push overlay data to module-level vars."""
-	global _overlay_zoom, _overlay_lat, _overlay_lon, _overlay_scale, _overlay_locked
+	global _overlay_zoom, _overlay_lat, _overlay_lon, _overlay_scale, _overlay_detail_offset, _overlay_export_tiles
 
 	try:
 		_ = self.map
@@ -352,7 +351,13 @@ def drawInfosText(self, context):
 	# --- Update module-level overlay data for the persistent draw handler ---
 	_overlay_zoom = zoom
 	_overlay_scale = int(scale)
-	_overlay_locked = self.map.lockedZoom is not None
+	settings = context.scene.gis_basemap
+	_overlay_detail_offset = settings.detail_offset
+	if settings.detail_offset != 0:
+		export_z = _clamp_export_zoom(self.map, settings.detail_offset)
+		_overlay_export_tiles = _estimate_export_tiles(self.map, export_z)
+	else:
+		_overlay_export_tiles = 0
 
 	# Convert projected cursor coords to geographic lat/lon
 	try:
@@ -363,10 +368,11 @@ def drawInfosText(self, context):
 	except Exception:
 		pass  # keep previous values on error
 
-	# --- Simplified header: only progress and lock status ---
+	# --- Simplified header: only progress and detail offset status ---
 	txt = "Map view"
-	if self.map.lockedZoom is not None:
-		txt += " [Zoom locked]"
+	if settings.detail_offset != 0:
+		export_z = _clamp_export_zoom(self.map, settings.detail_offset)
+		txt += "  [Export: z{} ({:+d})]".format(export_z, settings.detail_offset)
 	if self.progress:
 		txt += "  " + self.progress
 	if context.area:
@@ -450,7 +456,7 @@ def drawRoundedRect(x, y, w, h, color, radius=6):
 
 def _drawInfoOverlay(context):
 	"""Draw zoom level, coordinates and scale overlay in the bottom-left corner."""
-	global _overlay_zoom, _overlay_lat, _overlay_lon, _overlay_scale, _overlay_locked
+	global _overlay_zoom, _overlay_lat, _overlay_lon, _overlay_scale, _overlay_detail_offset, _overlay_export_tiles
 
 	font_id = 0
 	pad_x, pad_y = 14, 10
@@ -459,8 +465,8 @@ def _drawInfoOverlay(context):
 
 	# Build text lines (bottom-up order: first item drawn at bottom)
 	zoom_txt = "Z: {}".format(_overlay_zoom)
-	if _overlay_locked:
-		zoom_txt += "  (Locked)"
+	if _overlay_detail_offset != 0:
+		zoom_txt += "  (Export: {:+d})".format(_overlay_detail_offset)
 
 	# Format lat/lon
 	lat_dir = "N" if _overlay_lat >= 0 else "S"
@@ -530,6 +536,43 @@ def _drawOverlayPersistent():
 	gpu.state.blend_set('NONE')
 
 
+def _clamp_export_zoom(basemap, detail_offset):
+	"""Compute and clamp export zoom from current zoom + offset."""
+	z = basemap.zoom + detail_offset
+	z = max(0, min(z, basemap.tm.nbLevels - 1))
+	z = max(basemap.layer.zmin, min(z, basemap.layer.zmax))
+	return z
+
+
+def _estimate_export_tiles(basemap, export_zoom):
+	"""Estimate how many tiles would be needed for export at the given zoom."""
+	try:
+		w, h = basemap.area.width, basemap.area.height
+		z = basemap.zoom
+		res = basemap.tm.getRes(z)
+		if basemap.crs == 'EPSG:4326':
+			res = meters2dd(res)
+		loc = basemap.reg3d.view_location
+		dx, dy, dz = loc
+		ox = basemap.crsx + (dx * basemap.scale)
+		oy = basemap.crsy + (dy * basemap.scale)
+		xmin = ox - w/2 * res * basemap.scale
+		ymax = oy + h/2 * res * basemap.scale
+		xmax = ox + w/2 * res * basemap.scale
+		ymin = oy - h/2 * res * basemap.scale
+		bbox = (xmin, ymin, xmax, ymax)
+		if basemap.crs != basemap.tm.CRS:
+			bbox = reprojBbox(basemap.crs, basemap.tm.CRS, bbox)
+		export_res = basemap.tm.getRes(export_zoom)
+		tile_size = basemap.tm.tileSize
+		bxmin, bymin, bxmax, bymax = bbox
+		cols = math.ceil((bxmax - bxmin) / (tile_size * export_res))
+		rows = math.ceil((bymax - bymin) / (tile_size * export_res))
+		return max(0, cols) * max(0, rows)
+	except Exception:
+		return 0
+
+
 ###############
 
 def _list_sources(self, context):
@@ -546,16 +589,36 @@ def _list_layers(self, context):
 			items.append((laykey, lay['name'], lay['description']))
 	return items
 
+def _on_source_layer_changed(self, context):
+	global _source_change_pending
+	if _map_viewer_active:
+		_source_change_pending = True
+
+def _on_detail_offset_changed(self, context):
+	global _detail_changed_pending
+	if _map_viewer_active:
+		_detail_changed_pending = True
+
 class GIS_PG_basemap_settings(PropertyGroup):
 	src: EnumProperty(
 		name="Source",
 		description="Choose map service source",
-		items=_list_sources
+		items=_list_sources,
+		update=_on_source_layer_changed
 	)
 	lay: EnumProperty(
 		name="Layer",
 		description="Choose layer",
-		items=_list_layers
+		items=_list_layers,
+		update=_on_source_layer_changed
+	)
+	detail_offset: IntProperty(
+		name="Detail Offset",
+		description="Adjust tile detail level. Positive = more detail, negative = less detail",
+		default=0,
+		min=-5,
+		max=8,
+		update=_on_detail_offset_changed,
 	)
 
 
@@ -873,9 +936,8 @@ class VIEW3D_OT_map_viewer(Operator):
 
 	def _cleanup_modal(self, context):
 		"""Remove draw handlers, timer, header text and deactivate map viewer."""
-		global _map_viewer_active, _zoom_locked
+		global _map_viewer_active
 		_map_viewer_active = False
-		_zoom_locked = False
 		self.map.stop()
 		bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
 		bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
@@ -929,7 +991,7 @@ class VIEW3D_OT_map_viewer(Operator):
 		return {'FINISHED'}
 
 	def modal(self, context, event):
-		global _map_viewer_active, _goto_pending, _export_pending, _exit_pending, _lock_zoom_pending, _zoom_locked
+		global _map_viewer_active, _goto_pending, _export_pending, _exit_pending, _source_change_pending, _detail_changed_pending
 
 		if not context.area:
 			return {'CANCELLED'}
@@ -951,21 +1013,20 @@ class VIEW3D_OT_map_viewer(Operator):
 					return self._do_export(context)
 				else:
 					self.progress = 'Tiles still loading, please wait…'
-			#Check if N-Panel "Lock Zoom" was toggled
-			if _lock_zoom_pending:
-				_lock_zoom_pending = False
-				if self.map.lockedZoom is None:
-					self.map.lockedZoom = self.map.zoom
-					_zoom_locked = True
-				else:
-					self.map.lockedZoom = None
-					_zoom_locked = False
-					self.map.get()
+			#Check if N-Panel detail offset was changed
+			if _detail_changed_pending:
+				_detail_changed_pending = False
+				self.map.get()
+			#Check if N-Panel source/layer was changed
+			if _source_change_pending:
+				_source_change_pending = False
+				self._cleanup_modal(context)
+				self.restart = True
+				return {'FINISHED'}
 			#Check if N-Panel "Exit" was clicked
 			if _exit_pending:
 				_exit_pending = False
 				self._cleanup_modal(context)
-				_zoom_locked = False
 				return {'CANCELLED'}
 			return {'PASS_THROUGH'}
 
@@ -1005,26 +1066,25 @@ class VIEW3D_OT_map_viewer(Operator):
 					# map zoom up
 					if self.map.zoom < self.map.layer.zmax and self.map.zoom < self.map.tm.nbLevels-1:
 						self.map.zoom += 1
-						if self.map.lockedZoom is None:
-							resFactor = self.map.tm.getNextResFac(self.map.zoom)
-							if not self.prefs.zoomToMouse:
-								context.region_data.view_distance *= resFactor
+						resFactor = self.map.tm.getNextResFac(self.map.zoom)
+						if not self.prefs.zoomToMouse:
+							context.region_data.view_distance *= resFactor
+						else:
+							#Progressibly zoom to cursor
+							dst = context.region_data.view_distance
+							dst2 = dst * resFactor
+							context.region_data.view_distance = dst2
+							mouseLoc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
+							viewLoc = context.region_data.view_location.copy()
+							moveFactor = (dst - dst2) / dst
+							deltaVect = (mouseLoc - viewLoc) * moveFactor
+							if self.prefs.lockOrigin:
+								context.region_data.view_location = viewLoc + deltaVect
 							else:
-								#Progressibly zoom to cursor
-								dst = context.region_data.view_distance
-								dst2 = dst * resFactor
-								context.region_data.view_distance = dst2
-								mouseLoc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
-								viewLoc = context.region_data.view_location.copy()
-								moveFactor = (dst - dst2) / dst
-								deltaVect = (mouseLoc - viewLoc) * moveFactor
-								if self.prefs.lockOrigin:
-									context.region_data.view_location = viewLoc + deltaVect
-								else:
-									dx, dy, dz = deltaVect
-									if not self.prefs.lockObj and self.map.bkg is not None:
-										self.map.bkg.location  -= deltaVect
-									self.map.moveOrigin(dx, dy, updObjLoc=self.updObjLoc)
+								dx, dy, dz = deltaVect
+								if not self.prefs.lockObj and self.map.bkg is not None:
+									self.map.bkg.location  -= deltaVect
+								self.map.moveOrigin(dx, dy, updObjLoc=self.updObjLoc)
 						self.map.get()
 
 
@@ -1056,26 +1116,25 @@ class VIEW3D_OT_map_viewer(Operator):
 					#map zoom down
 					if self.map.zoom > self.map.layer.zmin and self.map.zoom > 0:
 						self.map.zoom -= 1
-						if self.map.lockedZoom is None:
-							resFactor = self.map.tm.getPrevResFac(self.map.zoom)
-							if not self.prefs.zoomToMouse:
-								context.region_data.view_distance *= resFactor
+						resFactor = self.map.tm.getPrevResFac(self.map.zoom)
+						if not self.prefs.zoomToMouse:
+							context.region_data.view_distance *= resFactor
+						else:
+							#Progressibly zoom to cursor
+							dst = context.region_data.view_distance
+							dst2 = dst * resFactor
+							context.region_data.view_distance = dst2
+							mouseLoc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
+							viewLoc = context.region_data.view_location.copy()
+							moveFactor = (dst - dst2) / dst
+							deltaVect = (mouseLoc - viewLoc) * moveFactor
+							if self.prefs.lockOrigin:
+								context.region_data.view_location = viewLoc + deltaVect
 							else:
-								#Progressibly zoom to cursor
-								dst = context.region_data.view_distance
-								dst2 = dst * resFactor
-								context.region_data.view_distance = dst2
-								mouseLoc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
-								viewLoc = context.region_data.view_location.copy()
-								moveFactor = (dst - dst2) / dst
-								deltaVect = (mouseLoc - viewLoc) * moveFactor
-								if self.prefs.lockOrigin:
-									context.region_data.view_location = viewLoc + deltaVect
-								else:
-									dx, dy, dz = deltaVect
-									if not self.prefs.lockObj and self.map.bkg is not None:
-										self.map.bkg.location  -= deltaVect
-									self.map.moveOrigin(dx, dy, updObjLoc=self.updObjLoc)
+								dx, dy, dz = deltaVect
+								if not self.prefs.lockObj and self.map.bkg is not None:
+									self.map.bkg.location  -= deltaVect
+								self.map.moveOrigin(dx, dy, updObjLoc=self.updObjLoc)
 						self.map.get()
 
 
@@ -1242,17 +1301,6 @@ class VIEW3D_OT_map_viewer(Operator):
 			self.restart = True
 			self.dialog = 'OPTIONS'
 			return {'FINISHED'}
-
-		#Lock/unlock 3d view zoom distance
-		if event.type == 'L' and event.value == 'PRESS':
-			if self.map.lockedZoom is None:
-				self.map.lockedZoom = self.map.zoom
-				_zoom_locked = True
-			else:
-				self.map.lockedZoom = None
-				_zoom_locked = False
-				self.map.get()
-
 
 		#ZOOM BOX
 		if event.type == 'B' and event.value == 'PRESS':
@@ -1557,24 +1605,6 @@ class VIEW3D_OT_map_export(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-class VIEW3D_OT_map_lock_zoom(bpy.types.Operator):
-	"""Toggle zoom level lock"""
-
-	bl_idname = "view3d.map_lock_zoom"
-	bl_label = "Lock Zoom"
-	bl_description = 'Lock/unlock the current zoom level'
-	bl_options = {'INTERNAL'}
-
-	@classmethod
-	def poll(cls, context):
-		return _map_viewer_active
-
-	def execute(self, context):
-		global _lock_zoom_pending
-		_lock_zoom_pending = True
-		return {'FINISHED'}
-
-
 class VIEW3D_OT_map_exit(bpy.types.Operator):
 	"""Exit the map viewer"""
 
@@ -1602,7 +1632,6 @@ classes = [
 	VIEW3D_OT_map_goto_history,
 	VIEW3D_OT_map_resume,
 	VIEW3D_OT_map_export,
-	VIEW3D_OT_map_lock_zoom,
 	VIEW3D_OT_map_exit,
 ]
 

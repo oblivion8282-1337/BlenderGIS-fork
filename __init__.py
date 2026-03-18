@@ -250,10 +250,27 @@ class VIEW3D_PT_gis_map(bpy.types.Panel):
 			_mv2 = sys.modules.get(__package__ + '.operators.view3d_mapviewer')
 			viewer_active = _mv2 and getattr(_mv2, '_map_viewer_active', False)
 			if viewer_active:
+				# Zoom info display
+				_zoom = getattr(_mv2, '_overlay_zoom', 0)
+				_offset = context.scene.gis_basemap.detail_offset
+				if _offset != 0:
+					_export_z = _zoom + _offset
+					# Clamp display (approximate — real clamping in operator)
+					_export_z = max(0, _export_z)
+					row = layout.row()
+					row.label(text="Zoom: {} → Export: {} ({:+d})".format(_zoom, _export_z, _offset), icon='INFO')
+					_tiles = getattr(_mv2, '_overlay_export_tiles', 0)
+					if _tiles > 0:
+						row = layout.row()
+						row.label(text="~{:,} tiles".format(_tiles), icon='MESH_GRID')
+				else:
+					row = layout.row()
+					row.label(text="Zoom: {}".format(_zoom), icon='INFO')
+				# Detail offset slider
+				layout.prop(context.scene.gis_basemap, 'detail_offset', text='Detail Offset')
+				# Export and Exit buttons
 				layout.operator("view3d.map_export", icon='CHECKMARK', text="Export as Mesh")
 				row = layout.row(align=True)
-				_locked = _mv2 and getattr(_mv2, '_zoom_locked', False)
-				row.operator("view3d.map_lock_zoom", icon='LOCKED' if _locked else 'UNLOCKED', text="Lock Zoom", depress=_locked)
 				row.operator("view3d.map_exit", icon='PANEL_CLOSE', text="Exit")
 			else:
 				row = layout.row(align=True)
@@ -443,7 +460,6 @@ class VIEW3D_PT_gis_shortcuts(bpy.types.Panel):
 			("Ctrl + Drag", "Pan view only"),
 			("Numpad 2/4/6/8", "Pan direction"),
 			("B", "Zoom box"),
-			("L", "Lock/unlock zoom level"),
 			("G", "Go to (search place)"),
 			("O", "Options"),
 			("E", "Export as mesh"),
