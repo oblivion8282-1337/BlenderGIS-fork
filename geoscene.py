@@ -667,8 +667,7 @@ class GEOSCENE_PT_georef(Panel):
 	bl_label = "Georeferencing"
 	bl_space_type = "VIEW_3D"
 	bl_region_type = "UI"
-	bl_parent_id = "VIEW3D_PT_gis_map"
-	bl_order = 0
+	bl_parent_id = "VIEW3D_PT_gis_tools"
 
 
 	def draw(self, context):

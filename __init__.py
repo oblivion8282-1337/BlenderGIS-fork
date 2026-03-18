@@ -218,10 +218,13 @@ class VIEW3D_PT_gis_map(bpy.types.Panel):
 	def draw(self, context):
 		layout = self.layout
 		if BASEMAPS:
-			layout.operator("view3d.map_start", icon_value=icons_dict["layers"].icon_id)
-			row = layout.row()
-			row.operator("view3d.map_resume", icon='LOOP_FORWARDS', text="Resume Map")
-			row.enabled = bpy.ops.view3d.map_resume.poll() if hasattr(bpy.ops.view3d, 'map_resume') else False
+			layout.prop(context.scene.gis_basemap, 'src', text='Source')
+			layout.prop(context.scene.gis_basemap, 'lay', text='Layer')
+			row = layout.row(align=True)
+			row.operator("view3d.map_start", icon_value=icons_dict["layers"].icon_id, text="Start")
+			sub = row.row(align=True)
+			sub.operator("view3d.map_resume", icon='LOOP_FORWARDS', text="Resume")
+			sub.enabled = bpy.ops.view3d.map_resume.poll() if hasattr(bpy.ops.view3d, 'map_resume') else False
 
 # GEOSCENE_PT_georef is registered as sub-panel (bl_parent_id) via geoscene.py
 

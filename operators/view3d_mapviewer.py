@@ -27,8 +27,8 @@ log = logging.getLogger(__name__)
 #bpy imports
 import bpy
 from mathutils import Vector
-from bpy.types import Operator, Panel, AddonPreferences
-from bpy.props import StringProperty, IntProperty, FloatProperty, BoolProperty, EnumProperty, FloatVectorProperty
+from bpy.types import Operator, Panel, AddonPreferences, PropertyGroup
+from bpy.props import StringProperty, IntProperty, FloatProperty, BoolProperty, EnumProperty, FloatVectorProperty, PointerProperty
 import addon_utils
 import gpu
 from gpu_extras.batch import batch_for_shader
@@ -515,6 +515,33 @@ def _drawOverlayPersistent():
 
 ###############
 
+def _list_sources(self, context):
+	items = []
+	for srckey, src in SOURCES.items():
+		items.append((srckey, src['name'], src['description']))
+	return items
+
+def _list_layers(self, context):
+	items = []
+	srckey = self.src
+	if srckey in SOURCES:
+		for laykey, lay in SOURCES[srckey]['layers'].items():
+			items.append((laykey, lay['name'], lay['description']))
+	return items
+
+class GIS_PG_basemap_settings(PropertyGroup):
+	src: EnumProperty(
+		name="Source",
+		description="Choose map service source",
+		items=_list_sources
+	)
+	lay: EnumProperty(
+		name="Layer",
+		description="Choose layer",
+		items=_list_layers
+	)
+
+
 class VIEW3D_OT_map_start(Operator):
 
 	bl_idname = "view3d.map_start"
@@ -602,7 +629,6 @@ class VIEW3D_OT_map_start(Operator):
 
 	def draw(self, context):
 		addonPrefs = context.preferences.addons[PKG].preferences
-		scn = context.scene
 		layout = self.layout
 
 		if self.dialog == 'SEARCH':
@@ -612,43 +638,10 @@ class VIEW3D_OT_map_start(Operator):
 					layout.prop(self, 'history', text="Recent")
 
 		elif self.dialog == 'OPTIONS':
-			#viewPrefs = context.preferences.view
-			#layout.prop(viewPrefs, "use_zoom_to_mouse")
 			layout.prop(addonPrefs, "zoomToMouse")
 			layout.prop(addonPrefs, "lockObj")
 			layout.prop(addonPrefs, "lockOrigin")
 			layout.prop(addonPrefs, "synchOrj")
-
-		elif self.dialog == 'MAP':
-			layout.prop(self, 'src', text='Source')
-			layout.prop(self, 'lay', text='Layer')
-			col = layout.column()
-			if not HAS_GDAL:
-				col.enabled = False
-				col.label(text='(No raster reprojection support)')
-			col.prop(self, 'grd', text='Tile matrix set')
-
-			#srcCRS = GRIDS[SOURCES[self.src]['grid']]['CRS']
-			grdCRS = GRIDS[self.grd]['CRS']
-			row = layout.row()
-			#row.alignment = 'RIGHT'
-			desc = PredefCRS.getName(grdCRS)
-			if desc is not None:
-				row.label(text='CRS: ' + desc)
-			else:
-				row.label(text='CRS: ' + grdCRS)
-
-			row = layout.row()
-			row.prop(self, 'recenter')
-
-			geoscn = GeoScene(scn)
-			if geoscn.isPartiallyGeoref:
-				#layout.separator()
-				georefManagerLayout(self, context)
-
-			#row = layout.row()
-			#row.label(text='Map scale:')
-			#row.prop(scn, '["'+SK.SCALE+'"]', text='')
 
 
 	def invoke(self, context, event):
@@ -661,18 +654,27 @@ class VIEW3D_OT_map_start(Operator):
 			self.report({'WARNING'}, "View3D not found, cannot run operator")
 			return {'CANCELLED'}
 
+		if self.dialog == 'MAP':
+			# Read source/layer from scene properties (set in N-panel)
+			settings = context.scene.gis_basemap
+			self.src = settings.src
+			self.lay = settings.lay
+			# Use source's native grid
+			self.grd = SOURCES[self.src]['grid']
+			#Update zoom
+			geoscn = GeoScene(context.scene)
+			if geoscn.hasZoom:
+				self.zoom = geoscn.zoom
+			# Start directly, no popup
+			return self.execute(context)
+
+		# SEARCH and OPTIONS dialogs still use popup
 		#Pre-fill with last used source/layer/grid if available
-		if self.dialog == 'MAP' and _last_map_src is not None:
+		if _last_map_src is not None:
 			self.src = _last_map_src
 			self.lay = _last_map_lay
 			self.grd = _last_map_grd
 
-		#Update zoom
-		geoscn = GeoScene(context.scene)
-		if geoscn.hasZoom:
-			self.zoom = geoscn.zoom
-
-		#Display dialog
 		return context.window_manager.invoke_props_dialog(self)
 
 	def cancel(self, context):
@@ -1495,6 +1497,8 @@ classes = [
 
 def register():
 	global _overlay_draw_handler
+	bpy.utils.register_class(GIS_PG_basemap_settings)
+	bpy.types.Scene.gis_basemap = PointerProperty(type=GIS_PG_basemap_settings)
 	for cls in classes:
 		try:
 			bpy.utils.register_class(cls)
@@ -1531,3 +1535,6 @@ def unregister():
 		del bpy.types.Scene.gis_goto_query
 	for cls in classes:
 		bpy.utils.unregister_class(cls)
+	if hasattr(bpy.types.Scene, 'gis_basemap'):
+		del bpy.types.Scene.gis_basemap
+	bpy.utils.unregister_class(GIS_PG_basemap_settings)
