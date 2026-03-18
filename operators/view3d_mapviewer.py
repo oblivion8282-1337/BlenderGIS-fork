@@ -378,6 +378,9 @@ def drawZoomBox(self, context):
 	except ReferenceError:
 		return  # operator was removed (addon reload)
 
+	if not context.area:
+		return
+
 	if self.zoomBoxMode and not self.zoomBoxDrag:
 		# before selection starts draw infinite cross
 		px, py = self.zb_xmax, self.zb_ymax
@@ -663,7 +666,7 @@ class VIEW3D_OT_map_start(Operator):
 			self.report({'ERROR'}, "No imaging library available. ImageIO module was not correctly installed.")
 			return {'CANCELLED'}
 
-		if not context.area.type == 'VIEW_3D':
+		if not context.area or not context.area.type == 'VIEW_3D':
 			self.report({'WARNING'}, "View3D not found, cannot run operator")
 			return {'CANCELLED'}
 
@@ -785,7 +788,7 @@ class VIEW3D_OT_map_viewer(Operator):
 
 	@classmethod
 	def poll(cls, context):
-		return context.area.type == 'VIEW_3D'
+		return context.area is not None and context.area.type == 'VIEW_3D'
 
 
 	def __del__(self):
@@ -794,6 +797,9 @@ class VIEW3D_OT_map_viewer(Operator):
 
 
 	def invoke(self, context, event):
+
+		if not context.area:
+			return {'CANCELLED'}
 
 		self.restart = False
 		self.dialog = 'MAP' # dialog name for MAP_START >> string in  ['MAP', 'SEARCH', 'OPTIONS']
@@ -914,12 +920,16 @@ class VIEW3D_OT_map_viewer(Operator):
 			showTextures(context)
 
 		#Restore 3D perspective view
-		context.area.spaces.active.region_3d.view_perspective = 'PERSP'
+		if context.area:
+			context.area.spaces.active.region_3d.view_perspective = 'PERSP'
 
 		return {'FINISHED'}
 
 	def modal(self, context, event):
 		global _map_viewer_active, _goto_pending, _export_pending, _exit_pending, _lock_zoom_pending, _zoom_locked
+
+		if not context.area:
+			return {'CANCELLED'}
 
 		context.area.tag_redraw()
 		scn = bpy.context.scene
@@ -1507,7 +1517,7 @@ class VIEW3D_OT_map_resume(bpy.types.Operator):
 
 	@classmethod
 	def poll(cls, context):
-		return (context.area.type == 'VIEW_3D'
+		return (context.area is not None and context.area.type == 'VIEW_3D'
 			and _last_map_src is not None
 			and _last_map_lay is not None
 			and _last_map_grd is not None)

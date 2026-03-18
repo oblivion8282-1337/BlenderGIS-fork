@@ -381,7 +381,7 @@ class GEOSCENE_OT_coords_viewer(Operator):
 
 	@classmethod
 	def poll(cls, context):
-		return bpy.context.mode == 'OBJECT' and context.area.type == 'VIEW_3D'
+		return bpy.context.mode == 'OBJECT' and context.area is not None and context.area.type == 'VIEW_3D'
 
 	def invoke(self, context, event):
 		self.geoscn = GeoScene(context.scene)
@@ -455,7 +455,8 @@ class GEOSCENE_OT_set_crs(Operator):
 			self.report({'ERROR'}, 'Cannot update crs. Check logs form more info')
 			return {'CANCELLED'}
 		#
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class GEOSCENE_OT_init_org(Operator):
