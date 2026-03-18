@@ -98,7 +98,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			('DEM_RAW', 'DEM raw data build [slow]', "Import a DEM as pixels points cloud with building faces. Do not use with huge dataset.")]
 			)
 	#
-	objectsLst: EnumProperty(attr="obj_list", name="Objects", description="Choose object to edit", items=listObjects)
+	objectsLst: EnumProperty(name="Objects", description="Choose object to edit", items=listObjects)
 	#
 	#Subdivise (as DEM option)
 	def listSubdivisionModes(self, context):

@@ -7,16 +7,19 @@ from bpy_extras.view3d_utils import region_2d_to_location_3d, region_2d_to_vecto
 from ...core import BBOX
 
 def isTopView(context):
-	if context.area.type == 'VIEW_3D':
-		reg3d = context.region_data
-	else:
+	if context.area is None or context.area.type != 'VIEW_3D':
+		return False
+	reg3d = context.region_data
+	if reg3d is None:
 		return False
 	return reg3d.view_perspective == 'ORTHO' and tuple(reg3d.view_matrix.to_euler()) == (0,0,0)
 
 def mouseTo3d(context, x, y):
 	'''Convert event.mouse_region to world coordinates'''
+	if context.area is None or context.region_data is None:
+		return None
 	if context.area.type != 'VIEW_3D':
-		raise Exception('Wrong context')
+		raise RuntimeError('Wrong context')
 	coords = (x, y)
 	reg = context.region
 	reg3d = context.region_data
@@ -56,6 +59,8 @@ class DropToGround():
 				rcHit.hit = False
 			else:
 				rcHit.hit = True
+		else:
+			raise ValueError(f"Unknown raycast method: {self.method}")
 		#adjust values
 		if not rcHit.hit:
 			#return same original 2d point with z=0
@@ -101,6 +106,8 @@ def adjust3Dview(context, bbox, zoomToSelect=True):
 					dst = 10000000 #too large clip distance broke the 3d view
 				space.clip_end = dst
 			if zoomToSelect:
+				if not area.regions:
+					continue
 				with context.temp_override(area=area, region=area.regions[-1]):
 					bpy.ops.view3d.view_selected()
 
@@ -129,7 +136,8 @@ def addTexture(mat, img, uvLay, name='texture'):
 	textureNode = node_tree.nodes.new('ShaderNodeTexImage')
 	textureNode.image = img
 	textureNode.extension = 'CLIP'
-	textureNode.show_texture = True
+	if hasattr(textureNode, 'show_texture'):
+		textureNode.show_texture = True
 	textureNode.location = (-400, 200)
 	# Create BSDF diffuse node
 	diffuseNode = node_tree.nodes.new('ShaderNodeBsdfPrincipled')#ShaderNodeBsdfDiffuse

@@ -398,10 +398,12 @@ class GEOSCENE_OT_coords_viewer(Operator):
 		if event.type == 'MOUSEMOVE':
 			loc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
 			x, y = self.geoscn.view3dToProj(loc.x, loc.y)
-			context.area.header_text_set("x {:.3f}, y {:.3f}, z {:.3f}".format(x, y, loc.z))
+			if context.area:
+				context.area.header_text_set("x {:.3f}, y {:.3f}, z {:.3f}".format(x, y, loc.z))
 		if event.type == 'ESC' and event.value == 'PRESS':
 			context.window.cursor_set('DEFAULT')
-			context.area.header_text_set(None)
+			if context.area:
+				context.area.header_text_set(None)
 			return {'CANCELLED'}
 		return {'RUNNING_MODAL'}
 

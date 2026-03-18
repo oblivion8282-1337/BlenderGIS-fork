@@ -96,7 +96,6 @@ class CAMERA_OT_geophotos_add(Operator):
     filename_ext = ""
 
     exifMode: EnumProperty(
-        attr="exif_mode",
         name="Action",
         description="Choose an action",
         items=[('TARGET_CAMERA','Target Camera','Create a camera with target helper'),('CAMERA','Camera','Create a camera'),('EMPTY','Empty','Create an empty helper'),('CURSOR','Cursor','Move cursor')],

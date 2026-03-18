@@ -368,7 +368,8 @@ def drawInfosText(self, context):
 		txt += " [Zoom locked]"
 	if self.progress:
 		txt += "  " + self.progress
-	context.area.header_text_set(txt)
+	if context.area:
+		context.area.header_text_set(txt)
 
 
 def drawZoomBox(self, context):
@@ -871,7 +872,8 @@ class VIEW3D_OT_map_viewer(Operator):
 		self.map.stop()
 		bpy.types.SpaceView3D.draw_handler_remove(self._drawTextHandler, 'WINDOW')
 		bpy.types.SpaceView3D.draw_handler_remove(self._drawZoomBoxHandler, 'WINDOW')
-		context.area.header_text_set(None)
+		if context.area:
+			context.area.header_text_set(None)
 		context.window_manager.event_timer_remove(self.timer)
 
 	def _do_export(self, context):
