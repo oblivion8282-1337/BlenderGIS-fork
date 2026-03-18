@@ -79,6 +79,9 @@ _export_pending = False
 #Flag: N-Panel "Exit" button was clicked while map viewer is running
 _exit_pending = False
 
+#Name of last exported mesh object (hidden on resume)
+_last_export_obj_name = None
+
 #Flag: N-Panel source/layer was changed while map viewer is running
 _source_change_pending = False
 
@@ -277,7 +280,8 @@ class BaseMap(GeoScene):
 			self.bkg = bkgs[0]
 			self.bkg.name = self.name
 			self.bkg.data = self.img
-			self.bkg.hide_viewport = False
+			self.bkg.hide_set(False)
+			self.bkg.hide_render = False
 			# Remove stale leftover background empties
 			for bkg in bkgs[1:]:
 				bpy.data.objects.remove(bkg, do_unlink=True)
@@ -933,6 +937,12 @@ class VIEW3D_OT_map_viewer(Operator):
 			#bpy.ops.view3d.view_center_cursor()
 			view3d.region_3d.view_location = (0, 0, 0)
 
+		#Hide last exported mesh when resuming
+		if _last_export_obj_name and _last_export_obj_name in context.scene.objects:
+			exp_obj = context.scene.objects[_last_export_obj_name]
+			exp_obj.hide_set(True)
+			exp_obj.hide_render = True
+
 		#Init some properties
 		# tag if map is currently drag
 		self.inMove = False
@@ -987,7 +997,8 @@ class VIEW3D_OT_map_viewer(Operator):
 		if self.map.bkg is None:
 			return
 		self._cleanup_modal(context)
-		self.map.bkg.hide_viewport = True
+		self.map.bkg.hide_set(True)
+		self.map.bkg.hide_render = True
 
 		#Copy image to new datablock
 		bpyImg = bpy.data.images.load(self.map.imgPath)
@@ -1005,6 +1016,8 @@ class VIEW3D_OT_map_viewer(Operator):
 
 		#Create object
 		obj = placeObj(mesh, name)
+		global _last_export_obj_name
+		_last_export_obj_name = obj.name
 
 		#UV mapping
 		uvTxtLayer = mesh.uv_layers.new(name='rastUVmap')
