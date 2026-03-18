@@ -209,7 +209,7 @@ class VIEW3D_PT_gis_map(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_map"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 0
 
 	def draw_header(self, context):
@@ -267,7 +267,7 @@ class VIEW3D_PT_gis_scene(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_scene"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 1
 
 	def draw_header(self, context):
@@ -290,7 +290,7 @@ class VIEW3D_PT_gis_import(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_import"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 2
 	bl_options = {'DEFAULT_CLOSED'}
 
@@ -325,7 +325,7 @@ class VIEW3D_PT_gis_export(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_export"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 3
 	bl_options = {'DEFAULT_CLOSED'}
 
@@ -344,7 +344,7 @@ class VIEW3D_PT_gis_tools(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_tools"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 4
 	bl_options = {'DEFAULT_CLOSED'}
 
@@ -359,7 +359,7 @@ class VIEW3D_PT_gis_mesh(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_mesh"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_parent_id = "VIEW3D_PT_gis_tools"
 
 	def draw(self, context):
@@ -378,7 +378,7 @@ class VIEW3D_PT_gis_camera(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_camera"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_parent_id = "VIEW3D_PT_gis_tools"
 	bl_options = {'DEFAULT_CLOSED'}
 
@@ -395,7 +395,7 @@ class VIEW3D_PT_gis_analysis(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_analysis"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_parent_id = "VIEW3D_PT_gis_tools"
 
 	def draw(self, context):
@@ -408,7 +408,7 @@ class VIEW3D_PT_gis_settings(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_settings"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_parent_id = "VIEW3D_PT_gis_tools"
 	bl_options = {'DEFAULT_CLOSED'}
 
@@ -424,7 +424,7 @@ class VIEW3D_PT_gis_shortcuts(bpy.types.Panel):
 	bl_idname = "VIEW3D_PT_gis_shortcuts"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_order = 99
 	bl_options = {'DEFAULT_CLOSED'}
 

@@ -1522,7 +1522,7 @@ class IMPORTGIS_PT_building_materials(Panel):
 	bl_idname = "IMPORTGIS_PT_building_materials"
 	bl_space_type = 'VIEW_3D'
 	bl_region_type = 'UI'
-	bl_category = 'GIS'
+	bl_category = 'CartoBlend'
 	bl_parent_id = "VIEW3D_PT_gis_scene"
 
 	def draw_header(self, context):
