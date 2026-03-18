@@ -4,7 +4,7 @@ Author : domlysz@gmail.com
 Date : february 2016
 License : GPL
 
-This file is part of BlenderGIS.
+This file is part of CartoBlend.
 This is a kmeans implementation optimized for 1D data.
 
 Original kmeans code :

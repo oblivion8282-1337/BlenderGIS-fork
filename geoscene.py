@@ -109,7 +109,7 @@ class GeoScene():
 			y = self.crsy + (dy * self.scale)
 			return x, y
 		else:
-			raise Exception("Scene origin coordinate is unset")
+			raise ValueError("Scene origin coordinate is unset")
 
 	def projToView3d(self, dx, dy):
 		'''Convert view3d coords to crs coords'''
@@ -118,7 +118,7 @@ class GeoScene():
 			y = (dy * self.scale) - self.crsy
 			return x, y
 		else:
-			raise Exception("Scene origin coordinate is unset")
+			raise ValueError("Scene origin coordinate is unset")
 
 	@property
 	def hasCRS(self):
@@ -184,7 +184,7 @@ class GeoScene():
 	def updOriginPrj(self, x, y, updObjLoc=True, synch=True):
 		'''Update/move scene origin passing absolute coordinates'''
 		if not self.hasOriginPrj:
-			raise Exception("Cannot update an unset origin.")
+			raise ValueError("Cannot update an unset origin.")
 		dx = x - self.crsx
 		dy = y - self.crsy
 		self.setOriginPrj(x, y, synch)
@@ -194,14 +194,14 @@ class GeoScene():
 
 	def updOriginGeo(self, lon, lat, updObjLoc=True):
 		if not self.isGeoref:
-			raise Exception("Cannot update geo origin of an ungeoref scene.")
+			raise RuntimeError("Cannot update geo origin of an ungeoref scene.")
 		x, y = reprojPt(4326, self.crs, lon, lat)
 		self.updOriginPrj(x, y, updObjLoc)
 
 
 	def moveOriginGeo(self, dx, dy, updObjLoc=True):
 		if not self.hasOriginGeo:
-			raise Exception("Cannot move an unset origin.")
+			raise ValueError("Cannot move an unset origin.")
 		x = self.lon + dx
 		y = self.lat + dy
 		self.updOriginGeo(x, y, updObjLoc=updObjLoc)
@@ -209,7 +209,7 @@ class GeoScene():
 	def moveOriginPrj(self, dx, dy, useScale=True, updObjLoc=True, synch=True):
 		'''Move scene origin passing relative deltas'''
 		if not self.hasOriginPrj:
-			raise Exception("Cannot move an unset origin.")
+			raise ValueError("Cannot move an unset origin.")
 
 		if useScale:
 			self.setOriginPrj(self.crsx + dx * self.scale, self.crsy + dy * self.scale, synch)
@@ -264,7 +264,7 @@ class GeoScene():
 				# will raise an error is current crs is empty or invalid
 				self.crsx, self.crsy = reprojPt(self.crs, str(crs), self.crsx, self.crsy)
 			else:
-				raise Exception("Scene origin coordinates cannot be updated because current CRS is invalid.")
+				raise RuntimeError("Scene origin coordinates cannot be updated because current CRS is invalid.")
 		#Set ID prop
 		self.scn[SK.CRS] = str(crs)
 		self._set_prop_ui(SK.CRS, description="Map Coordinate Reference System")

@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -255,7 +255,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			#Load raster
 			try:
 				rast = bpyGeoRaster(filePath)
-			except IOError as e:
+			except OSError as e:
 				log.error("Unable to open raster", exc_info=True)
 				self.report({'ERROR'}, "Unable to open raster, check logs for more infos")
 				return {'CANCELLED'}
@@ -288,7 +288,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			#Load raster
 			try:
 				rast = bpyGeoRaster(filePath)
-			except IOError as e:
+			except OSError as e:
 				log.error("Unable to open raster", exc_info=True)
 				self.report({'ERROR'}, "Unable to open raster, check logs for more infos")
 				return {'CANCELLED'}
@@ -343,7 +343,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			#Load raster
 			try:
 				rast = bpyGeoRaster(filePath, subBoxGeo=subBox)
-			except IOError as e:
+			except OSError as e:
 				log.error("Unable to open raster", exc_info=True)
 				self.report({'ERROR'}, "Unable to open raster, check logs for more infos")
 				return {'CANCELLED'}
@@ -385,7 +385,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			# Load raster
 			try:
 				grid = bpyGeoRaster(filePath, subBoxGeo=subBox, clip=self.clip, fillNodata=self.fillNodata, useGDAL=HAS_GDAL, raw=True)
-			except IOError as e:
+			except OSError as e:
 				log.error("Unable to open raster", exc_info=True)
 				self.report({'ERROR'}, "Unable to open raster, check logs for more infos")
 				return {'CANCELLED'}
@@ -443,7 +443,7 @@ class IMPORTGIS_OT_georaster(Operator, ImportHelper):
 			# Load raster
 			try:
 				grid = GeoRaster(filePath, subBoxGeo=subBox, useGDAL=HAS_GDAL)
-			except IOError as e:
+			except OSError as e:
 				log.error("Unable to open raster", exc_info=True)
 				self.report({'ERROR'}, "Unable to open raster, check logs for more infos")
 				return {'CANCELLED'}

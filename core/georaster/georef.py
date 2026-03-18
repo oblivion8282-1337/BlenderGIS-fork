@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -60,7 +60,7 @@ class GeoRef():
 			if isinstance(crs, SRS):
 				self.crs = crs
 			else:
-				raise IOError("CRS must be SRS() class object not " + str(type(crs)))
+				raise OSError("CRS must be SRS() class object not " + str(type(crs)))
 		else:
 			self.crs = crs
 
@@ -94,7 +94,7 @@ class GeoRef():
 			origin = xy(float(wf[4].replace(',','.')), float(wf[5].replace(',','.')))
 			return cls(rasterSize, pxSize, origin, rot=rotation, pxCenter=True, crs=None)
 		except Exception as e:
-			raise IOError("Unable to read worldfile. {}".format(e))
+			raise OSError("Unable to read worldfile. {}".format(e))
 
 	@classmethod
 	def fromTyf(cls, tif):
@@ -135,7 +135,7 @@ class GeoRef():
 			pxSize[1] = -pxSize.y #make negative value
 			rotation = xy(0, 0)
 		else:
-			raise IOError("Unable to read geotags")
+			raise OSError("Unable to read geotags")
 
 		#Define anchor point for top left coord
 		#	http://www.remotesensing.org/geotiff/spec/geotiff2.5.html#2.5.2
@@ -355,7 +355,7 @@ class GeoRef():
 		'''set a subbox in geographic coordinate space
 		if needed, coords will be adjusted to avoid being outside raster size'''
 		if self.hasRotation:
-			raise IOError("A subbox cannot be define if the raster has rotation parameter")
+			raise OSError("A subbox cannot be define if the raster has rotation parameter")
 		#Before set the property, ensure that the desired subbox overlap the raster extent
 		if not self.bbox.overlap(subBoxGeo):
 			raise OverlapError()

@@ -4,7 +4,7 @@ log = logging.getLogger(__name__)
 #GDAL
 try:
 	from osgeo import gdal
-except:
+except ImportError:
 	HAS_GDAL = False
 	log.debug('GDAL Python binding unavailable')
 else:
@@ -15,7 +15,7 @@ else:
 #PyProj
 try:
 	import pyproj
-except:
+except ImportError:
 	HAS_PYPROJ = False
 	log.debug('PyProj unavailable')
 else:
@@ -26,7 +26,7 @@ else:
 #PIL/Pillow
 try:
 	from PIL import Image
-except:
+except ImportError:
 	HAS_PIL = False
 	log.debug('Pillow unavailable')
 else:

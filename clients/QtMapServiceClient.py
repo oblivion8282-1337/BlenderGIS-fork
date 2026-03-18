@@ -291,7 +291,7 @@ class QtMapServiceClient(QtGui.QMainWindow, mainForm):
 	def uiDoCancelThread(self):
 		try:
 			self.thread.cancel()
-		except:
+		except AttributeError:
 			pass
 
 	def uiSendQuestion(self, titre, msg):

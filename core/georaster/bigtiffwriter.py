@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #

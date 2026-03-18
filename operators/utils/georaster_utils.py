@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -265,7 +265,7 @@ class bpyGeoRaster(GeoRaster):
 			self.bpyImg = bpy.data.images.load(self.path)
 		except Exception as e:
 			log.error("Unable to open raster", exc_info=True)
-			raise IOError("Unable to open raster") #it will not print traceback (instead of a bare raise)
+			raise OSError("Unable to open raster") #it will not print traceback (instead of a bare raise)
 		if pack:
 			#WARN : packed image can only be stored as png and this format does not support float32 datatype
 			self.bpyImg.pack()
@@ -323,9 +323,9 @@ class bpyGeoRaster(GeoRaster):
 		Array origin is top left
 		'''
 		if not self.isLoaded:
-			raise IOError("Can read only image opened in Blender")
+			raise OSError("Can read only image opened in Blender")
 		if self.ddtype is None:
-			raise IOError("Undefined data type")
+			raise OSError("Undefined data type")
 		if subset and self.subBoxGeo is None:
 			return None
 		nbBands = self.bpyImg.channels #Blender will return 4 channels even with a one band tiff

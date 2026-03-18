@@ -43,7 +43,7 @@ class Settings():
 	@proj_engine.setter
 	def proj_engine(self, engine):
 		if engine not in getAvailableProjEngines():
-			raise IOError
+			raise OSError
 		else:
 			self._proj_engine = engine
 
@@ -54,7 +54,7 @@ class Settings():
 	@img_engine.setter
 	def img_engine(self, engine):
 		if engine not in getAvailableImgEngines():
-			raise IOError
+			raise OSError
 		else:
 			self._img_engine = engine
 

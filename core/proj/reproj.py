@@ -80,7 +80,7 @@ def reprojImg(crs1, crs2, ds1, out_ul=None, out_size=None, out_res=None, sqPx=Fa
 		xmin, resx, rotx, ymax, roty, resy = geoTrans
 		#Note that instead of worldfile, topleft geotag is at corner not pixel center
 	else:
-		raise IOError("Reprojection fails: input raster is not georeferenced")
+		raise OSError("Reprojection fails: input raster is not georeferenced")
 
 
 	img_w, img_h = ds1.RasterXSize, ds1.RasterYSize
@@ -92,7 +92,7 @@ def reprojImg(crs1, crs2, ds1, out_ul=None, out_size=None, out_res=None, sqPx=Fa
 		ymin = ymax + img_h * resy
 		bbox = BBOX(xmin, ymin, xmax, ymax)
 	else:
-		raise IOError("Raster must be rectified (no rotation parameters)")
+		raise OSError("Raster must be rectified (no rotation parameters)")
 		#TODO reuse the GeoRef class to extract bbox even if there are rotation parameters
 
 	#Assign input CRS to input datasource

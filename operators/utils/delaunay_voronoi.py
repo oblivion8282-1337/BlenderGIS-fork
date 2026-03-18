@@ -223,7 +223,7 @@ class Context(object):
 		#try to get start & end point
 		try:
 			startPt, endPt = [pt for pt in pts if pts.count(pt)<2]#start and end point aren't duplicate
-		except:#all points are duplicate --> polygon is complete --> append some or other edge points
+		except ValueError:#all points are duplicate --> polygon is complete --> append some or other edge points
 			complete=True
 			firstIdx=0
 			poly.append(edges[0][0])

@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -63,7 +63,7 @@ class GeoRaster():
 
 			self.format = getImgFormat(path)
 			if self.format not in ['TIFF', 'BMP', 'PNG', 'JPEG', 'JPEG2000']:
-				raise IOError("Unsupported format {}".format(self.format))
+				raise OSError("Unsupported format {}".format(self.format))
 
 			if self.isTiff:
 				self._fromTIFF()
@@ -75,7 +75,7 @@ class GeoRaster():
 				# Try to read file header
 				w, h = getImgDim(self.path)
 				if w is None or h is None:
-					raise IOError("Unable to read raster size")
+					raise OSError("Unable to read raster size")
 				else:
 					self.size = xy(w, h)
 				#georef
@@ -87,7 +87,7 @@ class GeoRaster():
 			self._fromGDAL()
 
 		if not self.isGeoref:
-			raise IOError("Unable to read georef infos from worldfile or geotiff tags")
+			raise OSError("Unable to read georef infos from worldfile or geotiff tags")
 
 		if subBoxGeo is not None:
 			self.georef.setSubBoxGeo(subBoxGeo)
@@ -149,7 +149,7 @@ class GeoRaster():
 	def _fromGDAL(self):
 		'''Use GDAL to extract raster infos and init'''
 		if self.path is None or not self.fileExists:
-			raise IOError("Cannot find file on disk")
+			raise OSError("Cannot find file on disk")
 		ds = gdal.Open(self.path, gdal.GA_ReadOnly)
 		self.size = xy(ds.RasterXSize, ds.RasterYSize)
 		self.format = ds.GetDriver().ShortName

@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -462,7 +462,7 @@ class NpImage():
 	def reproj(self, crs1, crs2, out_ul=None, out_size=None, out_res=None, sqPx=False, resamplAlg='BL'):
 		ds1 = self.toGDAL()
 		if not self.isGeoref:
-			raise IOError('Unable to reproject non georeferenced image')
+			raise OSError('Unable to reproject non georeferenced image')
 		ds2 = reprojImg(crs1, crs2, ds1, out_ul=out_ul, out_size=out_size, out_res=out_res, sqPx=sqPx, resamplAlg=resamplAlg)
 		return NpImage(ds2)
 

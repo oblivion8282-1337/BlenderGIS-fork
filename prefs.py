@@ -571,7 +571,8 @@ class BGIS_OT_add_predef_crs(Operator):
 		prefs.predefCrsJson = json.dumps(data)
 		#change enum index to new added crs and redraw
 		#prefs.predefCrs = self.crs
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		#end
 		if self.save:
 			bpy.ops.wm.save_userpref()
@@ -591,7 +592,8 @@ class BGIS_OT_rmv_predef_crs(Operator):
 			data = json.loads(prefs.predefCrsJson)
 			data = [e for e in data if e[0] != key]
 			prefs.predefCrsJson = json.dumps(data)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_reset_predef_crs(Operator):
@@ -604,7 +606,8 @@ class BGIS_OT_reset_predef_crs(Operator):
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
 		prefs.predefCrsJson = json.dumps(DEFAULT_CRS)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_edit_predef_crs(Operator):
@@ -637,7 +640,8 @@ class BGIS_OT_edit_predef_crs(Operator):
 			data = [entry for entry in data if entry[0] != key] #deleting
 			data.append((self.crs, self.name, self.desc))
 			prefs.predefCrsJson = json.dumps(data)
-			context.area.tag_redraw()
+			if context.area:
+				context.area.tag_redraw()
 		else:
 			self.report({'ERROR'}, 'Invalid CRS')
 
@@ -664,7 +668,8 @@ class BGIS_OT_add_osm_tag(Operator):
 		tags.append(self.tag)
 		prefs.osmTagsJson = json.dumps(tags)
 		prefs.osmTags = self.tag #update current idx
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_rmv_osm_tag(Operator):
@@ -681,7 +686,8 @@ class BGIS_OT_rmv_osm_tag(Operator):
 			tags = json.loads(prefs.osmTagsJson)
 			del tags[tags.index(tag)]
 			prefs.osmTagsJson = json.dumps(tags)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_reset_osm_tags(Operator):
@@ -694,7 +700,8 @@ class BGIS_OT_reset_osm_tags(Operator):
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
 		prefs.osmTagsJson = json.dumps(DEFAULT_OSM_TAGS)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_edit_osm_tag(Operator):
@@ -721,7 +728,8 @@ class BGIS_OT_edit_osm_tag(Operator):
 		tags.append(self.tag)
 		prefs.osmTagsJson = json.dumps(tags)
 		prefs.osmTags = self.tag #update current idx
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 #################
@@ -747,7 +755,8 @@ class BGIS_OT_add_dem_server(Operator):
 			data = json.loads(prefs.demServerJson)
 			data.append( (self.url, self.name, self.desc) )
 			prefs.demServerJson = json.dumps(data)
-			context.area.tag_redraw()
+			if context.area:
+				context.area.tag_redraw()
 		else:
 			self.report({'ERROR'}, 'Invalid URL')
 		return {'FINISHED'}
@@ -766,7 +775,8 @@ class BGIS_OT_rmv_dem_server(Operator):
 			data = json.loads(prefs.demServerJson)
 			data = [e for e in data if e[0] != key]
 			prefs.demServerJson = json.dumps(data)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_reset_dem_server(Operator):
@@ -779,7 +789,8 @@ class BGIS_OT_reset_dem_server(Operator):
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
 		prefs.demServerJson = json.dumps(DEFAULT_DEM_SERVER)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_edit_dem_server(Operator):
@@ -812,7 +823,8 @@ class BGIS_OT_edit_dem_server(Operator):
 			data = [entry for entry in data if entry[0] != key] #deleting
 			data.append((self.url, self.name, self.desc))
 			prefs.demServerJson = json.dumps(data)
-			context.area.tag_redraw()
+			if context.area:
+				context.area.tag_redraw()
 		else:
 			self.report({'ERROR'}, 'Invalid URL')
 		return {'FINISHED'}
@@ -878,7 +890,8 @@ class BGIS_OT_add_overpass_server(Operator):
 		data.append( (self.url, self.name, self.desc) )
 		prefs.overpassServerJson = json.dumps(data)
 		#EditEnum('overpassServer').append(self.url, self.name, self.desc, check=lambda url: url.startswith('http'))
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_rmv_overpass_server(Operator):
@@ -895,7 +908,8 @@ class BGIS_OT_rmv_overpass_server(Operator):
 			data = json.loads(prefs.overpassServerJson)
 			data = [e for e in data if e[0] != key]
 			prefs.overpassServerJson = json.dumps(data)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_reset_overpass_server(Operator):
@@ -908,7 +922,8 @@ class BGIS_OT_reset_overpass_server(Operator):
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
 		prefs.overpassServerJson = json.dumps(DEFAULT_OVERPASS_SERVER)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 class BGIS_OT_edit_overpass_server(Operator):
@@ -939,7 +954,8 @@ class BGIS_OT_edit_overpass_server(Operator):
 		data = [entry for entry in data if entry[0] != key] #deleting
 		data.append((self.url, self.name, self.desc))
 		prefs.overpassServerJson = json.dumps(data)
-		context.area.tag_redraw()
+		if context.area:
+			context.area.tag_redraw()
 		return {'FINISHED'}
 
 

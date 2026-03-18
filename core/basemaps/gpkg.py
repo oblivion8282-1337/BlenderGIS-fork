@@ -172,7 +172,7 @@ class GeoPackage():
 					min_x, min_y, max_x, max_y,
 					srs_id)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);"""
-		db.execute(query, ("gpkg_tiles", "tiles", self.name, "Created with BlenderGIS", self.xmin, self.ymin, self.xmax, self.ymax, self.code))
+		db.execute(query, ("gpkg_tiles", "tiles", self.name, "Created with CartoBlend", self.xmin, self.ymin, self.xmax, self.ymax, self.code))
 		db.commit()
 		db.close()
 

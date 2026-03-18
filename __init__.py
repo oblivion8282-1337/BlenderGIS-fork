@@ -29,8 +29,8 @@ bl_info = {
 	'blender': (4, 2, 0),
 	'location': 'View3D > Sidebar > GIS',
 	'warning': '',
-	'wiki_url': 'https://github.com/oblivion8282-1337/BlenderGIS-fork/wiki',
-	'tracker_url': 'https://github.com/oblivion8282-1337/BlenderGIS-fork/issues',
+	'wiki_url': 'https://github.com/oblivion8282-1337/cartoblend/wiki',
+	'tracker_url': 'https://github.com/oblivion8282-1337/cartoblend/issues',
 	'link': '',
 	'support': 'COMMUNITY',
 	'category': '3D View'
@@ -97,7 +97,7 @@ logger.setLevel(logging.DEBUG)
 logger.info('###### Starting new Blender session : {}'.format(datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
 def _excepthook(exc_type, exc_value, exc_traceback):
-	if 'BlenderGIS' in exc_traceback.tb_frame.f_code.co_filename or 'CartoBlend' in exc_traceback.tb_frame.f_code.co_filename:
+	if 'cartoblend' in exc_traceback.tb_frame.f_code.co_filename or 'CartoBlend' in exc_traceback.tb_frame.f_code.co_filename:
 		logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
 	sys.__excepthook__(exc_type, exc_value, exc_traceback)
 

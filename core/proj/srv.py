@@ -59,7 +59,7 @@ class MapTilerCoordinates():
 		except HTTPError as e:
 			log.error('Cannot ping {} web service, http error {}'.format(url, e.code))
 			raise e
-		except:
+		except Exception:
 			raise
 
 	def reprojPt(self, epsg1, epsg2, x1, y1):
@@ -140,7 +140,7 @@ class MapTilerCoordinates():
 		obj = self.search(epsg)
 		try:
 			return obj[0]['exports']['wkt']
-		except:
+		except (KeyError, IndexError):
 			log.error('Could not find ESRI WKT for EPSG:{}'.format(epsg))
 			return None
 

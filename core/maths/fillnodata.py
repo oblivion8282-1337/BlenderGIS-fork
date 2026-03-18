@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 
-# This file is part of BlenderGIS
+# This file is part of CartoBlend
 
 #  ***** GPL LICENSE BLOCK *****
 #
@@ -150,7 +150,7 @@ def replace_nans(array, max_iter, tolerance, kernel_size=1, method='localmean'):
 
 
 def sincinterp(image, x,  y, kernel_size=3 ):
-	"""
+	r"""
 	Re-sample an image at intermediate positions between pixels.
 	This function uses a cardinal interpolation formula which limits
 	the loss of information in the resampling process. It uses a limited
