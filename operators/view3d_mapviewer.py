@@ -1034,11 +1034,39 @@ class VIEW3D_OT_map_viewer(Operator):
 		if self.prefs.forceTexturedSolid:
 			showTextures(context)
 
+		#Auto-snap GPX tracks to the freshly exported terrain mesh
+		self._snap_tracks_to_terrain(context, obj)
+
 		#Restore 3D perspective view
 		if context.area:
 			context.area.spaces.active.region_3d.view_perspective = 'PERSP'
 
 		return {'FINISHED'}
+
+	@staticmethod
+	def _snap_tracks_to_terrain(context, terrain_obj):
+		"""Apply 'Snap to Terrain' GN modifier to any mesh objects that lack one."""
+		from .io_import_gpx import _get_or_create_gpx_snap_geonodes
+		snap_ng = _get_or_create_gpx_snap_geonodes()
+		for obj in context.scene.objects:
+			if obj.type != 'MESH' or obj == terrain_obj:
+				continue
+			# Skip objects that already have a snap modifier
+			if any(m.type == 'NODES' and m.node_group == snap_ng for m in obj.modifiers):
+				continue
+			# Skip EXPORT_ meshes (other basemap exports)
+			if obj.name.startswith('EXPORT_'):
+				continue
+			snap_mod = obj.modifiers.new('Snap to Terrain', 'NODES')
+			snap_mod.node_group = snap_ng
+			for item in snap_ng.interface.items_tree:
+				if item.name == 'Terrain' and hasattr(item, 'identifier'):
+					snap_mod[item.identifier] = terrain_obj
+					break
+			# Move snap modifier to top so it runs before other modifiers
+			idx = list(obj.modifiers).index(snap_mod)
+			if idx > 0:
+				obj.modifiers.move(idx, 0)
 
 	def modal(self, context, event):
 		global _map_viewer_active, _goto_pending, _goto_prev_zoom, _export_pending, _exit_pending, _source_change_pending, _detail_changed_pending, _zoom_jump_pending, _zoom_syncing
