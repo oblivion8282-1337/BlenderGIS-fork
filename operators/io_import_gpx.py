@@ -5,7 +5,6 @@ import xml.etree.ElementTree as ET
 log = logging.getLogger(__name__)
 
 import bpy
-import bmesh
 from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, FloatProperty, EnumProperty
 
@@ -282,9 +281,18 @@ def _get_or_create_gpx_snap_geonodes():
 def _get_or_create_route_geonodes():
 	"""Create or return a Geometry Nodes group for giving routes a visible width.
 	Supports Flat Band and Tube profiles, with curve subdivision smoothing.
-	Profile input: 0 = Flat Band, 1 = Tube."""
+	Profile input: 0 = Flat Band, 1 = Tube.
+	Input is expected to be Curve geometry (not Mesh)."""
 	ng_name = 'GPX Route Width'
 	ng = bpy.data.node_groups.get(ng_name)
+	if ng is not None:
+		# Auto-detect old version (missing Trim, Bezier, or has Mesh to Curve)
+		has_old_m2c = any(n.bl_idname == 'GeometryNodeMeshToCurve' for n in ng.nodes)
+		has_trim = any(n.bl_idname == 'GeometryNodeTrimCurve' for n in ng.nodes)
+		has_bezier = any(n.bl_idname == 'GeometryNodeCurveSplineType' for n in ng.nodes)
+		if has_old_m2c or not has_trim or not has_bezier:
+			bpy.data.node_groups.remove(ng)
+			ng = None
 	if ng is not None:
 		return ng
 
@@ -315,6 +323,11 @@ def _get_or_create_route_geonodes():
 	s_zoff.min_value = -1000.0
 	s_zoff.max_value = 1000.0
 	s_zoff.description = "Lift route above surface"
+	s_growth = ng.interface.new_socket('Growth', in_out='INPUT', socket_type='NodeSocketFloat')
+	s_growth.default_value = 1.0
+	s_growth.min_value = 0.0
+	s_growth.max_value = 1.0
+	s_growth.description = "Animate route: 0 = hidden, 1 = full path"
 	ng.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
 
 	nodes = ng.nodes
@@ -326,15 +339,30 @@ def _get_or_create_route_geonodes():
 	out = nodes.new('NodeGroupOutput')
 	out.location = (800, 0)
 
-	# Mesh to Curve
-	m2c = nodes.new('GeometryNodeMeshToCurve')
-	m2c.location = (-600, 0)
-	links.new(inp.outputs['Geometry'], m2c.inputs['Mesh'])
+	# Trim Curve for growth animation (0 → 1 factor)
+	trim = nodes.new('GeometryNodeTrimCurve')
+	trim.mode = 'FACTOR'
+	trim.location = (-600, 0)
+	links.new(inp.outputs['Geometry'], trim.inputs['Curve'])
+	trim.inputs['Start'].default_value = 0.0
+	links.new(inp.outputs['Growth'], trim.inputs['End'])
 
-	# Subdivide Curve for smoothing (resolution = number of cuts)
+	# Convert POLY → BEZIER for smooth interpolation through GPS points
+	spline_type = nodes.new('GeometryNodeCurveSplineType')
+	spline_type.spline_type = 'BEZIER'
+	spline_type.location = (-450, 0)
+	links.new(trim.outputs['Curve'], spline_type.inputs['Curve'])
+
+	# Set handles to AUTO for automatic smooth curves
+	handle_type = nodes.new('GeometryNodeCurveSetHandles')
+	handle_type.handle_type = 'AUTO'
+	handle_type.location = (-300, 0)
+	links.new(spline_type.outputs['Curve'], handle_type.inputs['Curve'])
+
+	# Subdivide Curve for additional smoothing (resolution = number of cuts)
 	subdiv = nodes.new('GeometryNodeSubdivideCurve')
-	subdiv.location = (-400, 0)
-	links.new(m2c.outputs['Curve'], subdiv.inputs['Curve'])
+	subdiv.location = (-150, 0)
+	links.new(handle_type.outputs['Curve'], subdiv.inputs['Curve'])
 
 	# Smoothing → integer cuts (float to int via floor)
 	f2i = nodes.new('ShaderNodeMath')
@@ -722,19 +750,16 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			else:
 				return [(p[0] - dx, p[1] - dy, 0.0) for p in pts_prj]
 
-		# Helper: build a line object from 3D points
-		def make_line_object(name, pts_3d, parent_collection):
-			bm = bmesh.new()
-			verts = [bm.verts.new(pt) for pt in pts_3d]
-			for i in range(len(verts) - 1):
-				bm.edges.new([verts[i], verts[i + 1]])
+		# Helper: build a curve object from 3D points
+		def make_curve_object(name, pts_3d, parent_collection):
+			curve = bpy.data.curves.new(name, type='CURVE')
+			curve.dimensions = '3D'
+			spline = curve.splines.new('POLY')
+			spline.points.add(len(pts_3d) - 1)  # one point already exists
+			for i, pt in enumerate(pts_3d):
+				spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
 
-			mesh = bpy.data.meshes.new(name)
-			bm.to_mesh(mesh)
-			bm.free()
-			mesh.update()
-
-			obj = bpy.data.objects.new(name, mesh)
+			obj = bpy.data.objects.new(name, curve)
 			parent_collection.objects.link(obj)
 			obj.select_set(True)
 			obj.show_in_front = True  # always visible on top of basemap
@@ -755,7 +780,9 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			else:
 				trk_col = collection
 
-			merged_bm = None if self.separate else bmesh.new()
+			merged_curve = None if self.separate else bpy.data.curves.new('Tracks', type='CURVE')
+			if merged_curve:
+				merged_curve.dimensions = '3D'
 			track_idx = 0
 
 			for trk in gpx_data['tracks']:
@@ -774,23 +801,21 @@ class IMPORTGIS_OT_gpx_file(Operator):
 
 					if self.separate:
 						seg_name = trk_name if len(trk['segments']) == 1 else f"{trk_name} seg{seg_idx + 1}"
-						obj = make_line_object(seg_name, pts_3d, trk_col)
+						obj = make_curve_object(seg_name, pts_3d, trk_col)
 						obj['gpx_type'] = 'track'
 						obj['gpx_name'] = trk_name
 						created_objects.append(obj)
 					else:
-						# Accumulate into merged bmesh
-						verts = [merged_bm.verts.new(pt) for pt in pts_3d]
-						for i in range(len(verts) - 1):
-							merged_bm.edges.new([verts[i], verts[i + 1]])
+						# Accumulate as splines in merged curve
+						spline = merged_curve.splines.new('POLY')
+						spline.points.add(len(pts_3d) - 1)
+						for i, pt in enumerate(pts_3d):
+							spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
 
 			# Finalise merged tracks
-			if not self.separate and merged_bm is not None:
-				if len(merged_bm.verts) > 0:
-					mesh = bpy.data.meshes.new('Tracks')
-					merged_bm.to_mesh(mesh)
-					mesh.update()
-					obj = bpy.data.objects.new('Tracks', mesh)
+			if not self.separate and merged_curve is not None:
+				if len(merged_curve.splines) > 0:
+					obj = bpy.data.objects.new('Tracks', merged_curve)
 					trk_col.objects.link(obj)
 					obj.select_set(True)
 					obj.show_in_front = True
@@ -799,7 +824,8 @@ class IMPORTGIS_OT_gpx_file(Operator):
 					elif terrain_obj is not None:
 						_apply_route_geonodes(obj, 0, self.curveResolution, profile_int, terrain_obj)
 					created_objects.append(obj)
-				merged_bm.free()
+				else:
+					bpy.data.curves.remove(merged_curve)
 
 		# --- Import Routes ------------------------------------------------------
 		if self.importRoutes and n_routes > 0:
@@ -809,7 +835,9 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			else:
 				rte_col = collection
 
-			merged_bm = None if self.separate else bmesh.new()
+			merged_curve = None if self.separate else bpy.data.curves.new('Routes', type='CURVE')
+			if merged_curve:
+				merged_curve.dimensions = '3D'
 
 			for rte_idx, rte in enumerate(gpx_data['routes']):
 				rte_name = rte['name'] or f"Route {rte_idx + 1}"
@@ -823,21 +851,19 @@ class IMPORTGIS_OT_gpx_file(Operator):
 					continue
 
 				if self.separate:
-					obj = make_line_object(rte_name, pts_3d, rte_col)
+					obj = make_curve_object(rte_name, pts_3d, rte_col)
 					obj['gpx_type'] = 'route'
 					obj['gpx_name'] = rte_name
 					created_objects.append(obj)
 				else:
-					verts = [merged_bm.verts.new(pt) for pt in pts_3d]
-					for i in range(len(verts) - 1):
-						merged_bm.edges.new([verts[i], verts[i + 1]])
+					spline = merged_curve.splines.new('POLY')
+					spline.points.add(len(pts_3d) - 1)
+					for i, pt in enumerate(pts_3d):
+						spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
 
-			if not self.separate and merged_bm is not None:
-				if len(merged_bm.verts) > 0:
-					mesh = bpy.data.meshes.new('Routes')
-					merged_bm.to_mesh(mesh)
-					mesh.update()
-					obj = bpy.data.objects.new('Routes', mesh)
+			if not self.separate and merged_curve is not None:
+				if len(merged_curve.splines) > 0:
+					obj = bpy.data.objects.new('Routes', merged_curve)
 					rte_col.objects.link(obj)
 					obj.select_set(True)
 					obj.show_in_front = True
@@ -846,7 +872,8 @@ class IMPORTGIS_OT_gpx_file(Operator):
 					elif terrain_obj is not None:
 						_apply_route_geonodes(obj, 0, self.curveResolution, profile_int, terrain_obj)
 					created_objects.append(obj)
-				merged_bm.free()
+				else:
+					bpy.data.curves.remove(merged_curve)
 
 		# --- Import Waypoints ---------------------------------------------------
 		if self.importWaypoints and n_wpts > 0:
@@ -958,21 +985,28 @@ def _draw_gpx_overlay():
 		if obj.hide_get() or not obj.visible_get():
 			continue
 
-		mesh = obj.data
-		if not mesh.vertices:
-			continue
-
-		# Get vertex positions in world space, project to 2D
 		mw = obj.matrix_world
-		pts_2d = []
-		for v in mesh.vertices:
-			co_3d = mw @ v.co
-			co_2d = location_3d_to_region_2d(region, rv3d, co_3d)
-			if co_2d is not None:
-				pts_2d.append(co_2d)
 
-		if len(pts_2d) >= 2:
-			segments.append(pts_2d)
+		if obj.type == 'CURVE':
+			for spline in obj.data.splines:
+				pts_2d = []
+				for pt in spline.points:
+					co_3d = mw @ pt.co.to_3d()
+					co_2d = location_3d_to_region_2d(region, rv3d, co_3d)
+					if co_2d is not None:
+						pts_2d.append(co_2d)
+				if len(pts_2d) >= 2:
+					segments.append(pts_2d)
+		elif obj.type == 'MESH' and obj.data.vertices:
+			# Legacy mesh-based tracks
+			pts_2d = []
+			for v in obj.data.vertices:
+				co_3d = mw @ v.co
+				co_2d = location_3d_to_region_2d(region, rv3d, co_3d)
+				if co_2d is not None:
+					pts_2d.append(co_2d)
+			if len(pts_2d) >= 2:
+				segments.append(pts_2d)
 
 	if not segments:
 		return
