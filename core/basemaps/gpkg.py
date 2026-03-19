@@ -37,7 +37,16 @@ import threading
 
 class GeoPackage():
 
-	MAX_DAYS = 90
+	MAX_DAYS = 90  # default, overridden by addon preferences if available
+
+	@staticmethod
+	def _get_max_days():
+		try:
+			import bpy
+			prefs = bpy.context.preferences.addons['bl_ext.user_default.cartoblend'].preferences
+			return prefs.cacheExpiry
+		except Exception:
+			return GeoPackage.MAX_DAYS
 
 	def __init__(self, path, tm):
 		self.dbPath = path
@@ -280,7 +289,7 @@ class GeoPackage():
 			return None
 		try:
 			timeDelta = datetime.datetime.now() - result[1]
-			if timeDelta.days > self.MAX_DAYS:
+			if timeDelta.days > self._get_max_days():
 				return None
 		except (TypeError, AttributeError):
 			pass
@@ -313,7 +322,7 @@ class GeoPackage():
 		result = db.execute(
 			query,
 			(
-				GeoPackage.MAX_DAYS,
+				self._get_max_days(),
 				min(z), max(z),
 				min(x), max(x),
 				min(y), max(y)
@@ -345,7 +354,7 @@ class GeoPackage():
 		rows = db.execute(
 			query,
 			(
-				GeoPackage.MAX_DAYS,
+				self._get_max_days(),
 				min(z), max(z),
 				min(x), max(x),
 				min(y), max(y)

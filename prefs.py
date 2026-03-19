@@ -261,6 +261,13 @@ class BGIS_PREFS(AddonPreferences):
 		subtype = 'DIR_PATH'
 		)
 
+	cacheExpiry: IntProperty(
+		name = "Cache expiry (days)",
+		default = 90,
+		min = 1,
+		max = 365,
+		description = "Tiles older than this are re-downloaded on next access"
+		)
 
 	synchOrj: BoolProperty(
 		name="Synch. lat/long",
@@ -398,6 +405,22 @@ class BGIS_PREFS(AddonPreferences):
 		box = layout.box()
 		box.label(text='Basemaps')
 		box.prop(self, "cacheFolder")
+		box.prop(self, "cacheExpiry")
+		# Cache size info
+		cache_dir = self.cacheFolder
+		if cache_dir and os.path.isdir(cache_dir):
+			gpkg_files = [f for f in os.listdir(cache_dir) if f.endswith('.gpkg')]
+			total_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in gpkg_files)
+			if total_bytes > 1024 * 1024 * 1024:
+				size_str = "{:.1f} GB".format(total_bytes / (1024**3))
+			elif total_bytes > 1024 * 1024:
+				size_str = "{:.0f} MB".format(total_bytes / (1024**2))
+			else:
+				size_str = "{:.0f} KB".format(total_bytes / 1024)
+			box.label(text="Cache: {} ({} sources)".format(size_str, len(gpkg_files)), icon='FILE_CACHE')
+		row = box.row(align=True)
+		row.operator("bgis.cache_clear_expired", icon='TRASH', text="Clear Expired")
+		row.operator("bgis.cache_clear_all", icon='CANCEL', text="Clear All")
 		row = box.row()
 		row.prop(self, "zoomToMouse")
 		row.prop(self, "lockObj")
@@ -983,6 +1006,67 @@ class BGIS_OT_edit_overpass_server(Operator):
 		return {'FINISHED'}
 
 
+class BGIS_OT_cache_clear_all(Operator):
+	bl_idname = "bgis.cache_clear_all"
+	bl_description = 'Delete all cached tiles'
+	bl_label = "Clear All Cache"
+
+	def execute(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		cache_dir = prefs.cacheFolder
+		if not cache_dir or not os.path.isdir(cache_dir):
+			self.report({'WARNING'}, "Cache folder not found")
+			return {'CANCELLED'}
+		count = 0
+		for f in os.listdir(cache_dir):
+			if f.endswith('.gpkg'):
+				try:
+					os.remove(os.path.join(cache_dir, f))
+					count += 1
+				except OSError as e:
+					log.warning("Cannot remove %s: %s", f, e)
+		self.report({'INFO'}, "Removed {} cache files".format(count))
+		return {'FINISHED'}
+
+	def invoke(self, context, event):
+		return context.window_manager.invoke_confirm(self, event)
+
+
+class BGIS_OT_cache_clear_expired(Operator):
+	bl_idname = "bgis.cache_clear_expired"
+	bl_description = 'Remove expired tiles from cache and reclaim disk space'
+	bl_label = "Clear Expired Tiles"
+
+	def execute(self, context):
+		import sqlite3
+		prefs = context.preferences.addons[PKG].preferences
+		cache_dir = prefs.cacheFolder
+		expiry = prefs.cacheExpiry
+		if not cache_dir or not os.path.isdir(cache_dir):
+			self.report({'WARNING'}, "Cache folder not found")
+			return {'CANCELLED'}
+		total_removed = 0
+		for f in os.listdir(cache_dir):
+			if not f.endswith('.gpkg'):
+				continue
+			db_path = os.path.join(cache_dir, f)
+			try:
+				db = sqlite3.connect(db_path)
+				cursor = db.execute(
+					"DELETE FROM gpkg_tiles WHERE julianday('now','localtime') - julianday(last_modified) > ?",
+					(expiry,))
+				removed = cursor.rowcount
+				if removed > 0:
+					db.commit()
+					db.execute("VACUUM")
+					total_removed += removed
+				db.close()
+			except Exception as e:
+				log.warning("Cannot clean %s: %s", f, e)
+		self.report({'INFO'}, "Removed {} expired tiles".format(total_removed))
+		return {'FINISHED'}
+
+
 classes = [
 BGIS_OT_pref_show,
 BGIS_PREFS,
@@ -1001,7 +1085,9 @@ BGIS_OT_edit_dem_server,
 BGIS_OT_add_overpass_server,
 BGIS_OT_rmv_overpass_server,
 BGIS_OT_reset_overpass_server,
-BGIS_OT_edit_overpass_server
+BGIS_OT_edit_overpass_server,
+BGIS_OT_cache_clear_all,
+BGIS_OT_cache_clear_expired,
 ]
 
 def register():
