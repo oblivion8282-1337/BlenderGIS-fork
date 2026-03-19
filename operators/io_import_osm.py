@@ -959,16 +959,20 @@ class OSM_IMPORT():
 					#bm.edges.index_update()
 					#bm.faces.index_update()
 
+					objName = None
+					offset = 0
+
 					if self.filterTags:
 
 						#group by tags (there could be some duplicates)
 						for k in self.filterTags:
 
-							if k in extags: #
+							if k in extags:
 								objName = type + ':' + k
 								kbm = bmeshes.setdefault(objName, bmesh.new())
 								offset = len(kbm.verts)
 								joinBmesh(bm, kbm)
+								break  # assign to first matching tag only
 
 					else:
 						#group all into one unique mesh
@@ -977,31 +981,31 @@ class OSM_IMPORT():
 						offset = len(_bm.verts)
 						joinBmesh(bm, _bm)
 
+					if objName is not None:
+						#vertex group
+						name = tags.get('name', None)
+						vidx = [v.index + offset for v in bm.verts]
+						vgroups = vgroupsObj.setdefault(objName, {})
 
-					#vertex group
-					name = tags.get('name', None)
-					vidx = [v.index + offset for v in bm.verts]
-					vgroups = vgroupsObj.setdefault(objName, {})
+						for tag in extags:
+							#if tag in osmTags:#filter
+							if not tag.startswith('name'):
+								vgroup = vgroups.setdefault('Tag:'+tag, [])
+								vgroup.extend(vidx)
 
-					for tag in extags:
-						#if tag in osmTags:#filter
-						if not tag.startswith('name'):
-							vgroup = vgroups.setdefault('Tag:'+tag, [])
+						if name is not None:
+							#vgroup['Name:'+name] = [vidx]
+							vgroup = vgroups.setdefault('Name:'+name, [])
 							vgroup.extend(vidx)
 
-					if name is not None:
-						#vgroup['Name:'+name] = [vidx]
-						vgroup = vgroups.setdefault('Name:'+name, [])
-						vgroup.extend(vidx)
-
-					if 'relation' in self.featureType:
-						for rel in result.relations:
-							name = rel.tags.get('name', str(rel.id))
-							for member in rel.members:
-								#todo: remove duplicate members
-								if id == member.ref:
-									vgroup = vgroups.setdefault('Relation:'+name, [])
-									vgroup.extend(vidx)
+						if 'relation' in self.featureType:
+							for rel in result.relations:
+								name = rel.tags.get('name', str(rel.id))
+								for member in rel.members:
+									#todo: remove duplicate members
+									if id == member.ref:
+										vgroup = vgroups.setdefault('Relation:'+name, [])
+										vgroup.extend(vidx)
 
 
 

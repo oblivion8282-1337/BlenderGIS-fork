@@ -506,28 +506,29 @@ def _apply_route_geonodes(obj, width=3.0, resolution=2.0, profile=0, terrain_obj
 				snap_mod[item.identifier] = terrain_obj
 				break
 
-	# Route width + smoothing + profile
-	ng = _get_or_create_route_geonodes()
-	mod = obj.modifiers.new('GPX Route Width', 'NODES')
-	mod.node_group = ng
+	# Route width + smoothing + profile (skip if width=0: keep as edges only)
+	if width > 0:
+		ng = _get_or_create_route_geonodes()
+		mod = obj.modifiers.new('GPX Route Width', 'NODES')
+		mod.node_group = ng
 
-	# Set inputs
-	for item in ng.interface.items_tree:
-		if not hasattr(item, 'identifier'):
-			continue
-		if item.name == 'Width':
-			mod[item.identifier] = width
-		elif item.name == 'Smoothing':
-			mod[item.identifier] = resolution
-		elif item.name == 'Profile':
-			mod[item.identifier] = profile
-		elif item.name == 'Merge Dist':
-			mod[item.identifier] = width * 0.5
+		# Set inputs
+		for item in ng.interface.items_tree:
+			if not hasattr(item, 'identifier'):
+				continue
+			if item.name == 'Width':
+				mod[item.identifier] = width
+			elif item.name == 'Smoothing':
+				mod[item.identifier] = resolution
+			elif item.name == 'Profile':
+				mod[item.identifier] = profile
+			elif item.name == 'Merge Dist':
+				mod[item.identifier] = width * 0.5
 
-	# Material
-	mat = _get_or_create_route_material()
-	if mat.name not in [m.name for m in obj.data.materials]:
-		obj.data.materials.append(mat)
+		# Material
+		mat = _get_or_create_route_material()
+		if mat.name not in [m.name for m in obj.data.materials]:
+			obj.data.materials.append(mat)
 
 
 # ---------------------------------------------------------------------------
