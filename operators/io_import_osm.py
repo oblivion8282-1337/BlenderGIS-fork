@@ -636,9 +636,9 @@ def _apply_terrain_snap(obj, terrain_obj):
 		if item.name == 'Terrain':
 			mod[item.identifier] = terrain_obj
 	# Move to top of modifier stack
-	while obj.modifiers.find(mod.name) > 0:
-		with bpy.context.temp_override(object=obj):
-			bpy.ops.object.modifier_move_up(modifier=mod.name)
+	idx = obj.modifiers.find(mod.name)
+	if idx > 0:
+		obj.modifiers.move(idx, 0)
 
 
 ########################
@@ -1046,7 +1046,7 @@ class OSM_IMPORT():
 			context.scene.collection.children.link(layer)
 
 		#Build mesh
-		waysNodesId = [node.id for way in result.ways for node in way.nodes]
+		waysNodesId = {node.id for way in result.ways for node in way.nodes}
 
 		if 'node' in self.featureType:
 
@@ -1411,9 +1411,17 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 
 		return {'FINISHED'}
 
+_basemap_mesh_cache = None
+_basemap_mesh_time = 0
+
 def _find_basemap_mesh_and_image():
 	"""Find the basemap terrain mesh and its satellite image texture.
-	Returns (mesh_object, image) or (None, None)."""
+	Returns (mesh_object, image) or (None, None). Cached for 2 seconds."""
+	global _basemap_mesh_cache, _basemap_mesh_time
+	import time
+	now = time.monotonic()
+	if _basemap_mesh_cache is not None and (now - _basemap_mesh_time) < 2.0:
+		return _basemap_mesh_cache
 	for obj in bpy.data.objects:
 		if obj.type != 'MESH' or not obj.name.startswith('EXPORT_'):
 			continue
@@ -1423,8 +1431,12 @@ def _find_basemap_mesh_and_image():
 				continue
 			for node in mat.node_tree.nodes:
 				if node.type == 'TEX_IMAGE' and node.image:
-					return obj, node.image
-	return None, None
+					_basemap_mesh_cache = (obj, node.image)
+					_basemap_mesh_time = now
+					return _basemap_mesh_cache
+	_basemap_mesh_cache = (None, None)
+	_basemap_mesh_time = now
+	return _basemap_mesh_cache
 
 
 _building_objects_cache = None
