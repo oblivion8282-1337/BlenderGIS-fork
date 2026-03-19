@@ -37,6 +37,7 @@ PKG = __package__
 # scene objects on every pan event.
 _topParents_cache = None
 _topParents_time = 0
+_topParents_scene = None
 
 '''
 Policy :
@@ -230,11 +231,12 @@ class GeoScene():
 
 	def _moveObjLoc(self, dx, dy):
 		import time
-		global _topParents_cache, _topParents_time
+		global _topParents_cache, _topParents_time, _topParents_scene
 		now = time.monotonic()
-		if _topParents_cache is None or (now - _topParents_time) > 0.5:
+		if _topParents_cache is None or (now - _topParents_time) > 0.5 or _topParents_scene != self.scn.name:
 			_topParents_cache = [obj for obj in self.scn.objects if not obj.parent]
 			_topParents_time = now
+			_topParents_scene = self.scn.name
 		for obj in _topParents_cache:
 			obj.location.x -= dx
 			obj.location.y -= dy

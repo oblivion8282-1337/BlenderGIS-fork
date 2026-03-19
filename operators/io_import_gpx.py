@@ -988,13 +988,16 @@ _gpx_overlay_cache_batch = None
 
 
 def _get_gpx_shader():
-	global _gpx_shader_cache
+	global _gpx_shader_cache, _gpx_overlay_cache_batch, _gpx_overlay_cache_matrix
 	if _gpx_shader_cache is not None:
 		try:
 			_gpx_shader_cache.bind()
 			return _gpx_shader_cache
 		except Exception:
 			_gpx_shader_cache = None
+			# Invalidate batch cache built with old shader
+			_gpx_overlay_cache_batch = None
+			_gpx_overlay_cache_matrix = None
 	_gpx_shader_cache = gpu.shader.from_builtin('UNIFORM_COLOR')
 	return _gpx_shader_cache
 
