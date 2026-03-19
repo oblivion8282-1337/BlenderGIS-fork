@@ -306,6 +306,121 @@ SOURCES = {
 	},
 
 
+	"CARTO_LIGHT" : {
+		"name" : 'CartoDB Positron',
+		"description" : 'Light map style — CC BY 3.0',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"LABELS" : {"urlKey" : 'light_all', "name" : 'With Labels', "description" : 'Light style with labels', "format" : 'png', "zmin" : 0, "zmax" : 20},
+			"NOLABELS" : {"urlKey" : 'light_nolabels', "name" : 'No Labels', "description" : 'Light style without labels', "format" : 'png', "zmin" : 0, "zmax" : 20}
+		},
+		"urlTemplate": "https://basemaps.cartocdn.com/{LAY}/{Z}/{X}/{Y}.png",
+		"referer": "https://carto.com"
+	},
+
+
+	"CARTO_DARK" : {
+		"name" : 'CartoDB Dark Matter',
+		"description" : 'Dark map style — CC BY 3.0',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"LABELS" : {"urlKey" : 'dark_all', "name" : 'With Labels', "description" : 'Dark style with labels', "format" : 'png', "zmin" : 0, "zmax" : 20},
+			"NOLABELS" : {"urlKey" : 'dark_nolabels', "name" : 'No Labels', "description" : 'Dark style without labels', "format" : 'png', "zmin" : 0, "zmax" : 20}
+		},
+		"urlTemplate": "https://basemaps.cartocdn.com/{LAY}/{Z}/{X}/{Y}.png",
+		"referer": "https://carto.com"
+	},
+
+
+	"CARTO_VOYAGER" : {
+		"name" : 'CartoDB Voyager',
+		"description" : 'Colorful modern map style — CC BY 3.0',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"LABELS" : {"urlKey" : 'rastertiles/voyager', "name" : 'With Labels', "description" : 'Voyager style with labels', "format" : 'png', "zmin" : 0, "zmax" : 20},
+			"NOLABELS" : {"urlKey" : 'rastertiles/voyager_nolabels', "name" : 'No Labels', "description" : 'Voyager style without labels', "format" : 'png', "zmin" : 0, "zmax" : 20}
+		},
+		"urlTemplate": "https://basemaps.cartocdn.com/{LAY}/{Z}/{X}/{Y}.png",
+		"referer": "https://carto.com"
+	},
+
+
+	"OPENTOPOMAP" : {
+		"name" : 'OpenTopoMap',
+		"description" : 'Topographic map with contour lines — CC BY-SA 3.0',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"TOPO" : {"urlKey" : '', "name" : 'Topographic', "description" : 'Topographic map with elevation contours', "format" : 'png', "zmin" : 0, "zmax" : 17}
+		},
+		"urlTemplate": "https://tile.opentopomap.org/{Z}/{X}/{Y}.png",
+		"referer": "https://opentopomap.org"
+	},
+
+
+	"OSM_HOT" : {
+		"name" : 'Humanitarian OSM',
+		"description" : 'Humanitarian style — ODbL',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"HOT" : {"urlKey" : '', "name" : 'Humanitarian', "description" : 'Humanitarian/crisis style map', "format" : 'png', "zmin" : 0, "zmax" : 19}
+		},
+		"urlTemplate": "https://a.tile.openstreetmap.fr/hot/{Z}/{X}/{Y}.png",
+		"referer": "https://www.hotosm.org"
+	},
+
+
+	"CYCLOSM" : {
+		"name" : 'CyclOSM',
+		"description" : 'Bicycle-focused map — ODbL',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"CYCLE" : {"urlKey" : '', "name" : 'Cycling', "description" : 'Bicycle-focused map with routes and infrastructure', "format" : 'png', "zmin" : 0, "zmax" : 19}
+		},
+		"urlTemplate": "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/{Z}/{X}/{Y}.png",
+		"referer": "https://www.cyclosm.org"
+	},
+
+
+	"OPENRAILWAYMAP" : {
+		"name" : 'OpenRailwayMap',
+		"description" : 'Railway infrastructure overlay — CC BY-SA 2.0',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"RAIL" : {"urlKey" : '', "name" : 'Railways', "description" : 'Railway infrastructure overlay', "format" : 'png', "zmin" : 0, "zmax" : 19}
+		},
+		"urlTemplate": "https://a.tiles.openrailwaymap.org/standard/{Z}/{X}/{Y}.png",
+		"referer": "https://www.openrailwaymap.org"
+	},
+
+
+	"WIKIMEDIA" : {
+		"name" : 'Wikimedia',
+		"description" : 'Wikipedia-style map — CC BY-SA',
+		"service": 'TMS',
+		"grid": 'WM',
+		"quadTree": False,
+		"layers" : {
+			"MAP" : {"urlKey" : '', "name" : 'Wikimedia', "description" : 'Wikipedia-style map', "format" : 'png', "zmin" : 0, "zmax" : 19}
+		},
+		"urlTemplate": "https://maps.wikimedia.org/osm-intl/{Z}/{X}/{Y}.png",
+		"referer": "https://maps.wikimedia.org"
+	},
+
+
 	###############
 	# WMS examples
 	###############

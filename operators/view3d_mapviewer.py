@@ -779,7 +779,11 @@ class VIEW3D_OT_map_start(Operator):
 			# Read source/layer from scene properties (set in N-panel)
 			settings = context.scene.gis_basemap
 			self.src = settings.src
-			self.lay = settings.lay
+			# Fallback to first layer if stored value is empty/invalid
+			lay = settings.lay
+			if not lay or lay not in SOURCES[self.src]['layers']:
+				lay = next(iter(SOURCES[self.src]['layers']))
+			self.lay = lay
 			# Use source's native grid
 			self.grd = SOURCES[self.src]['grid']
 			#Update zoom
@@ -1049,7 +1053,7 @@ class VIEW3D_OT_map_viewer(Operator):
 		from .io_import_gpx import _get_or_create_gpx_snap_geonodes
 		snap_ng = _get_or_create_gpx_snap_geonodes()
 		for obj in context.scene.objects:
-			if obj.type != 'MESH' or obj == terrain_obj:
+			if obj.type not in ('MESH', 'CURVE') or obj == terrain_obj:
 				continue
 			# Skip objects that already have a snap modifier
 			if any(m.type == 'NODES' and m.node_group == snap_ng for m in obj.modifiers):
