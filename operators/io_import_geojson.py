@@ -33,10 +33,25 @@ def _joinBmesh(src_bm, dest_bm):
 		new_v = dest_bm.verts.new(v.co)
 		vert_map[v.index] = new_v
 	dest_bm.verts.ensure_lookup_table()
+	# Build face layer mapping (float and int layers)
+	face_float_map = []
+	for src_layer in src_bm.faces.layers.float:
+		dst_layer = dest_bm.faces.layers.float.get(src_layer.name)
+		if dst_layer is not None:
+			face_float_map.append((src_layer, dst_layer))
+	face_int_map = []
+	for src_layer in src_bm.faces.layers.int:
+		dst_layer = dest_bm.faces.layers.int.get(src_layer.name)
+		if dst_layer is not None:
+			face_int_map.append((src_layer, dst_layer))
 	for f in src_bm.faces:
 		try:
 			new_face = dest_bm.faces.new([vert_map[v.index] for v in f.verts])
 			new_face.material_index = f.material_index
+			for src_layer, dst_layer in face_float_map:
+				new_face[dst_layer] = f[src_layer]
+			for src_layer, dst_layer in face_int_map:
+				new_face[dst_layer] = f[src_layer]
 		except ValueError:
 			pass
 	for e in src_bm.edges:

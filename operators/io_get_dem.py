@@ -179,8 +179,10 @@ class IMPORTGIS_OT_dem_query(Operator):
 			if not result or not result.get('ok'):
 				err = result.get('error', 'Unknown error') if result else 'No result'
 				log.error(err)
-				# Report via a single-shot operator (timers cannot call self.report)
-				bpy.context.window.cursor_set('DEFAULT')
+				try:
+					bpy.context.window.cursor_set('DEFAULT')
+				except Exception:
+					pass
 				return None  # stop timer
 
 			filePath, onMesh, objectsLst = args

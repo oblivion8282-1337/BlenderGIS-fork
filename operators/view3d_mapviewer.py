@@ -466,16 +466,17 @@ def _get_uniform_shader():
 	return _cached_uniform_shader
 
 
-_rect_batch_cache = {}
+_rect_batch_cache_key = None
+_rect_batch_cache_batches = None
 
 def drawRoundedRect(x, y, w, h, color, radius=6):
-	"""Draw a rectangle with rounded corners. Batches are cached by geometry key."""
-	global _rect_batch_cache
+	"""Draw a rectangle with rounded corners. Batches cached for last geometry."""
+	global _rect_batch_cache_key, _rect_batch_cache_batches
 	key = (x, y, w, h, radius)
 	shader = _get_uniform_shader()
 	shader.bind()
 	shader.uniform_float("color", color)
-	if key not in _rect_batch_cache:
+	if key != _rect_batch_cache_key:
 		batches = []
 		# Center rect
 		batches.append(batch_for_shader(shader, 'TRI_STRIP', {"pos": [
@@ -498,8 +499,9 @@ def drawRoundedRect(x, y, w, h, color, radius=6):
 				(cx + 1, cy, 0), (cx + radius, cy, 0),
 				(cx, cy + 1, 0), (cx + radius, cy + radius, 0),
 			]}))
-		_rect_batch_cache[key] = batches
-	for batch in _rect_batch_cache[key]:
+		_rect_batch_cache_key = key
+		_rect_batch_cache_batches = batches
+	for batch in _rect_batch_cache_batches:
 		batch.draw(shader)
 
 def _drawInfoOverlay(context):
