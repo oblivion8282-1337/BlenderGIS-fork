@@ -24,6 +24,8 @@ import threading
 import logging
 log = logging.getLogger(__name__)
 
+import numpy as np
+
 #bpy imports
 import bpy
 from mathutils import Vector
@@ -212,9 +214,6 @@ class BaseMap(GeoScene):
 	def run(self):
 		"""thread method"""
 		self.mosaic = self.request()
-		if self.srv.running and self.mosaic is not None:
-			#save image
-			self.mosaic.save(self.imgPath)
 		needsPlace = self.srv.running and self.mosaic is not None
 		self.srv.stop()
 		if needsPlace:
@@ -270,11 +269,30 @@ class BaseMap(GeoScene):
 	def place(self):
 		'''Set map as background image'''
 
-		#Get or load bpy image
-		try:
-			self.img = [img for img in bpy.data.images if img.filepath == self.imgPath and len(img.packed_files) == 0][0]
-		except IndexError:
-			self.img = bpy.data.images.load(self.imgPath)
+		img_w, img_h = self.mosaic.size
+
+		#Get or create bpy image and upload pixels directly from numpy array
+		if self.img is not None and self.img.name in bpy.data.images:
+			#Reuse existing image, resize if needed
+			if self.img.size[0] != img_w or self.img.size[1] != img_h:
+				self.img.scale(img_w, img_h)
+		else:
+			self.img = bpy.data.images.new(self.name, img_w, img_h, alpha=True)
+			self.img.colorspace_settings.name = 'sRGB'
+
+		#Convert numpy array (uint8 RGBA, top-to-bottom) to Blender pixels (float32 RGBA, bottom-to-top)
+		px_data = self.mosaic.data
+		if px_data.shape[2] == 3:
+			#Add alpha channel if missing
+			alpha = np.full((img_h, img_w, 1), 255, dtype=np.uint8)
+			px_data = np.concatenate((px_data, alpha), axis=2)
+		#Flip vertically (Blender images are bottom-to-top)
+		px_data = px_data[::-1, :, :]
+		#Convert to float32 [0.0, 1.0] and flatten
+		flat = np.ascontiguousarray(px_data, dtype=np.float32).ravel()
+		flat *= (1.0 / 255.0)
+		self.img.pixels.foreach_set(flat)
+		self.img.update()
 
 		#Get or reuse background image empty
 		empties = [obj for obj in self.scn.objects if obj.type == 'EMPTY']
@@ -297,7 +315,6 @@ class BaseMap(GeoScene):
 
 		#Get some image props
 		img_ox, img_oy = self.mosaic.center
-		img_w, img_h = self.mosaic.size
 		res = self.mosaic.pxSize.x
 		#res = self.tm.getRes(self.zoom)
 
@@ -335,9 +352,6 @@ class BaseMap(GeoScene):
 		zdst = math.floor(zdst) #make sure no downgrade
 		self.reg3d.view_distance = zdst
 		self.viewDstZ = zdst
-
-		#Update image drawing
-		self.bkg.data.reload()
 
 	def _place_on_main_thread(self):
 		'''Timer callback to execute place() safely on the main thread'''
@@ -1039,6 +1053,9 @@ class VIEW3D_OT_map_viewer(Operator):
 		self._cleanup_modal(context)
 		self.map.bkg.hide_set(True)
 		self.map.bkg.hide_render = True
+
+		#Save mosaic to disk for export (live viewer skips disk I/O)
+		self.map.mosaic.save(self.map.imgPath)
 
 		#Copy image to new datablock
 		bpyImg = bpy.data.images.load(self.map.imgPath)

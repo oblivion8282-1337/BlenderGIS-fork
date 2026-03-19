@@ -1075,11 +1075,12 @@ class MapService():
 			seeder = threading.Thread(target=putInCache, args=(tilesData, jobs, cache))
 			seeder.daemon = True
 			seeder.start()
-			seeder.join()
 
-			#Make sure all threads has finished
+			#Wait for worker threads first (they exit when the download queue is empty)
 			for t in threads:
 				t.join()
+			#Then wait for seeder (it exits when the data queue is drained)
+			seeder.join()
 
 		#Reinit status and cpt progress
 		if cpt:

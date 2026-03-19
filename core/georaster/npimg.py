@@ -21,7 +21,7 @@
 
 import os
 import io
-import random
+import uuid
 
 import numpy as np
 
@@ -244,7 +244,7 @@ class NpImage():
 		elif self.IFACE == 'GDAL':
 			#Use a virtual memory file to create gdal dataset from buffer
 			#build a random name to make the function thread safe
-			vsipath = '/vsimem/' + ''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for i in range(5))
+			vsipath = '/vsimem/' + uuid.uuid4().hex[:8]
 			gdal.FileFromMemBuffer(vsipath, data)
 			try:
 				ds = gdal.Open(vsipath)
@@ -320,7 +320,7 @@ class NpImage():
 		elif self.IFACE == 'GDAL':
 			mem = self.toGDAL()
 			#build a random name to make the function thread safe
-			name = ''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for i in range(5))
+			name = uuid.uuid4().hex[:8]
 			vsiname = '/vsimem/' + name + '.png'
 			out = gdal.GetDriverByName(ext).CreateCopy(vsiname, mem)
 			# Read /vsimem/output.png

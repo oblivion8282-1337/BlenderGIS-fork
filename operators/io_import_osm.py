@@ -423,9 +423,9 @@ def _apply_building_geonodes(obj):
 	# Assign materials: slot 0 = rooftop, slot 1 = facade
 	mat_roof = _get_or_create_rooftop_material()
 	mat_facade = _get_or_create_facade_material()
-	if mat_roof.name not in [s.material.name for s in obj.material_slots if s.material]:
+	if not any(s.material == mat_roof for s in obj.material_slots):
 		obj.data.materials.append(mat_roof)
-	if mat_facade.name not in [s.material.name for s in obj.material_slots if s.material]:
+	if not any(s.material == mat_facade for s in obj.material_slots):
 		obj.data.materials.append(mat_facade)
 
 
@@ -641,19 +641,29 @@ def _apply_terrain_snap(obj, terrain_obj):
 
 
 ########################
-_join_buffer = None
 
 def joinBmesh(src_bm, dest_bm):
-	'''
-	Hack to join a bmesh to another
-	TODO: replace this function by bmesh.ops.duplicate when 'dest' argument will be implemented
-	'''
-	global _join_buffer
-	if _join_buffer is None or _join_buffer.name not in bpy.data.meshes:
-		_join_buffer = bpy.data.meshes.new(".temp")
-	src_bm.to_mesh(_join_buffer)
-	dest_bm.from_mesh(_join_buffer)
-	_join_buffer.clear_geometry()
+	'''Join src_bm into dest_bm using direct bmesh vertex/face/edge copying.'''
+	# Map old verts to new verts
+	vert_map = {}
+	for v in src_bm.verts:
+		new_v = dest_bm.verts.new(v.co)
+		vert_map[v.index] = new_v
+	dest_bm.verts.ensure_lookup_table()
+	# Copy faces (edges are created implicitly)
+	for f in src_bm.faces:
+		try:
+			new_face = dest_bm.faces.new([vert_map[v.index] for v in f.verts])
+			new_face.material_index = f.material_index
+		except ValueError:
+			pass  # duplicate face
+	# Copy edges that aren't part of faces
+	for e in src_bm.edges:
+		if not e.link_faces:
+			try:
+				dest_bm.edges.new([vert_map[v.index] for v in e.verts])
+			except ValueError:
+				pass
 
 
 
@@ -905,7 +915,6 @@ class OSM_IMPORT():
 				mesh = bpy.data.meshes.new(name)
 				bm.to_mesh(mesh)
 				mesh.update()
-				mesh.validate()
 
 				obj = bpy.data.objects.new(name, mesh)
 
@@ -1011,7 +1020,7 @@ class OSM_IMPORT():
 			for node in result.nodes:
 
 				#extended tags list
-				extags = list(node.tags.keys()) + [k + '=' + v for k, v in node.tags.items()]
+				extags = [*(node.tags.keys()), *(k + '=' + v for k, v in node.tags.items())]
 
 				if node.id in waysNodesId:
 					continue
@@ -1047,7 +1056,6 @@ class OSM_IMPORT():
 				bm.free()
 
 				mesh.update()#calc_edges=True)
-				mesh.validate()
 				obj = bpy.data.objects.new(name, mesh)
 				scn.collection.objects.link(obj)
 				obj.select_set(True)
