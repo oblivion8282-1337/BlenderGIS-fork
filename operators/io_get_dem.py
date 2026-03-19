@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 
 import logging
 log = logging.getLogger(__name__)
@@ -22,6 +23,29 @@ USER_AGENT = settings.user_agent
 PKG = __package__.rsplit('.', maxsplit=1)[0]  # bl_ext.user_default.cartoblend
 
 TIMEOUT = 120
+
+# Module-level state for background DEM download
+_dem_thread = None
+_dem_result = None   # dict with keys: 'filepath', 'onMesh', 'objectsLst', or 'error'
+_dem_context_args = None  # tuple of (filePath, onMesh, objectsLst) for the timer callback
+
+
+def _dem_download_thread(url, filePath, result_holder):
+	"""Run in a background thread: download DEM file and store result."""
+	rq = Request(url, headers={'User-Agent': result_holder['user_agent']})
+	try:
+		with urlopen(rq, timeout=TIMEOUT) as response, open(filePath, 'wb') as outFile:
+			data = response.read()
+			outFile.write(data)
+		result_holder['ok'] = True
+	except (URLError, HTTPError) as err:
+		result_holder['ok'] = False
+		result_holder['error'] = 'Http request fails url:{}, code:{}, error:{}'.format(
+			url, getattr(err, 'code', None), err.reason)
+	except TimeoutError:
+		result_holder['ok'] = False
+		result_holder['error'] = 'Http request timed out. url:{}'.format(url)
+
 
 class IMPORTGIS_OT_dem_query(Operator):
 	"""Import elevation data from a web service"""
@@ -117,55 +141,85 @@ class IMPORTGIS_OT_dem_query(Operator):
 		else:
 			filePath = os.path.join(bpy.app.tempdir, 'srtm.tif')
 
-		#we can directly init NpImg from blob but if gdal is not used as image engine then georef will not be extracted
-		#Alternatively, we can save on disk, open with GeoRaster class (will use tyf if gdal not available)
-		rq = Request(url, headers={'User-Agent': USER_AGENT})
-		try:
-			with urlopen(rq, timeout=TIMEOUT) as response, open(filePath, 'wb') as outFile:
-				data = response.read() # a `bytes` object
-				outFile.write(data) #
-		except (URLError, HTTPError) as err:
-			log.error('Http request fails url:{}, code:{}, error:{}'.format(url, getattr(err, 'code', None), err.reason))
-			self.report({'ERROR'}, "Cannot reach OpenTopography web service, check logs for more infos")
-			return {'CANCELLED'}
-		except TimeoutError:
-			log.error('Http request timed out. url:{}'.format(url))
-			info = "Cannot reach SRTM web service provider, server can be down or overloaded. Please retry later"
-			log.info(info)
-			self.report({'ERROR'}, info)
-			return {'CANCELLED'}
-
-		if not onMesh:
-			bpy.ops.importgis.georaster(
-			'EXEC_DEFAULT',
-			filepath = filePath,
-			reprojection = True,
-			rastCRS = 'EPSG:4326',
-			importMode = 'DEM',
-			subdivision = 'subsurf',
-			demInterpolation = True)
-		else:
+		# Resolve objectsLst before starting thread (bpy API is not thread-safe)
+		if onMesh:
 			objectsLst = next(
 				(str(i) for i, obj in enumerate(scn.collection.all_objects) if obj.name == context.active_object.name),
 				None)
 			if objectsLst is None:
 				self.report({'ERROR'}, "Active object not found in scene collection")
 				return {'CANCELLED'}
-			bpy.ops.importgis.georaster(
-			'EXEC_DEFAULT',
-			filepath = filePath,
-			reprojection = True,
-			rastCRS = 'EPSG:4326',
-			importMode = 'DEM',
-			subdivision = 'subsurf',
-			demInterpolation = True,
-			demOnMesh = True,
-			objectsLst = objectsLst,
-			clip = False,
-			fillNodata = False)
+		else:
+			objectsLst = None
 
-		bbox = getBBOX.fromScn(scn)
-		adjust3Dview(context, bbox, zoomToSelect=False)
+		# Start background download thread
+		global _dem_thread, _dem_result, _dem_context_args
+		_dem_result = {'ok': None, 'error': None, 'user_agent': USER_AGENT}
+		_dem_context_args = (filePath, onMesh, objectsLst)
+		_dem_thread = threading.Thread(
+			target=_dem_download_thread,
+			args=(url, filePath, _dem_result),
+			daemon=True)
+		_dem_thread.start()
+
+		self.report({'INFO'}, "Downloading DEM in background, please wait...")
+
+		# Register a timer to poll thread completion and trigger import
+		def _poll_dem_thread():
+			global _dem_thread, _dem_result, _dem_context_args
+			if _dem_thread is None or _dem_thread.is_alive():
+				return 0.5  # poll again in 0.5 s
+			# Thread finished
+			_dem_thread = None
+			result = _dem_result
+			args = _dem_context_args
+			_dem_result = None
+			_dem_context_args = None
+
+			if not result or not result.get('ok'):
+				err = result.get('error', 'Unknown error') if result else 'No result'
+				log.error(err)
+				# Report via a single-shot operator (timers cannot call self.report)
+				bpy.context.window.cursor_set('DEFAULT')
+				return None  # stop timer
+
+			filePath, onMesh, objectsLst = args
+			try:
+				if not onMesh:
+					bpy.ops.importgis.georaster(
+						'EXEC_DEFAULT',
+						filepath=filePath,
+						reprojection=True,
+						rastCRS='EPSG:4326',
+						importMode='DEM',
+						subdivision='subsurf',
+						demInterpolation=True)
+				else:
+					bpy.ops.importgis.georaster(
+						'EXEC_DEFAULT',
+						filepath=filePath,
+						reprojection=True,
+						rastCRS='EPSG:4326',
+						importMode='DEM',
+						subdivision='subsurf',
+						demInterpolation=True,
+						demOnMesh=True,
+						objectsLst=objectsLst,
+						clip=False,
+						fillNodata=False)
+				scn = bpy.context.scene
+				bbox2 = getBBOX.fromScn(scn)
+				adjust3Dview(bpy.context, bbox2, zoomToSelect=False)
+			except Exception as e:
+				log.error('DEM import failed after download', exc_info=True)
+			finally:
+				try:
+					bpy.context.window.cursor_set('DEFAULT')
+				except Exception:
+					pass
+			return None  # stop timer
+
+		bpy.app.timers.register(_poll_dem_thread, first_interval=0.5)
 
 		return {'FINISHED'}
 

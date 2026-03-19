@@ -233,6 +233,7 @@ class Reproj():
 		elif self.iproj == 'PYPROJ':
 			self.crs1 = crs1.getPyProj()
 			self.crs2 = crs2.getPyProj()
+			self._transformer = pyproj.Transformer.from_proj(self.crs1, self.crs2, always_xy=True)
 
 		elif self.iproj == 'EPSGIO':
 			self.mapTilerCoords = MapTilerCoordinates()
@@ -279,15 +280,9 @@ class Reproj():
 			return list(zip(xs, ys))
 
 		elif self.iproj == 'PYPROJ':
-			if self.crs1.crs.is_geographic:
-				ys, xs = zip(*pts)
-			else:
-				xs, ys = zip(*pts)
-			transformer = pyproj.Transformer.from_proj(self.crs1, self.crs2)
-			if self.crs2.crs.is_geographic:
-				ys, xs = transformer.transform(xs, ys)
-			else:
-				xs, ys = transformer.transform(xs, ys)
+			# always_xy=True means input is always (x, y) / (lon, lat) order
+			xs, ys = zip(*pts)
+			xs, ys = self._transformer.transform(xs, ys)
 			return list(zip(xs, ys))
 
 		elif self.iproj == 'EPSGIO':

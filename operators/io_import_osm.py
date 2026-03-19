@@ -1401,12 +1401,23 @@ def _find_basemap_mesh_and_image():
 	return None, None
 
 
+_building_objects_cache = None
+_building_objects_time = 0
+
 def _get_building_objects():
-	"""Return all mesh objects that have the Building Extrusion modifier."""
-	return [obj for obj in bpy.data.objects
+	"""Return all mesh objects that have the Building Extrusion modifier.
+	Result is cached for 2 seconds to avoid per-redraw scene scans."""
+	global _building_objects_cache, _building_objects_time
+	import time
+	now = time.monotonic()
+	if _building_objects_cache is not None and (now - _building_objects_time) < 2.0:
+		return _building_objects_cache
+	_building_objects_cache = [obj for obj in bpy.data.objects
 			if obj.type == 'MESH'
 			and any(m.type == 'NODES' and m.node_group and m.node_group.name == 'OSM Building Extrusion'
 					for m in obj.modifiers)]
+	_building_objects_time = now
+	return _building_objects_cache
 
 
 class IMPORTGIS_OT_apply_rooftop_texture(Operator):

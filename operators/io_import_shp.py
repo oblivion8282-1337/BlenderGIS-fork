@@ -698,11 +698,23 @@ class IMPORTGIS_OT_shapefile(Operator):
 								obj[fieldName] = record[i-1]
 
 				elif self.fieldExtrudeName:
-					#Join to final bmesh (use from_mesh method hack)
-					buff = bpy.data.meshes.new(".temp")
-					bm.to_mesh(buff)
-					finalBm.from_mesh(buff)
-					bpy.data.meshes.remove(buff)
+					#Join to final bmesh via direct bmesh copying (no temp mesh)
+					_vert_offset = len(finalBm.verts)
+					bm.verts.ensure_lookup_table()
+					for v in bm.verts:
+						finalBm.verts.new(v.co)
+					finalBm.verts.ensure_lookup_table()
+					for f in bm.faces:
+						try:
+							finalBm.faces.new([finalBm.verts[v.index + _vert_offset] for v in f.verts])
+						except ValueError:
+							pass
+					for e in bm.edges:
+						if not e.link_faces:
+							try:
+								finalBm.edges.new([finalBm.verts[v.index + _vert_offset] for v in e.verts])
+							except ValueError:
+								pass
 					bm.clear()
 
 			#Batch-apply selection for separate objects (deferred from the loop for performance)
@@ -729,7 +741,6 @@ class IMPORTGIS_OT_shapefile(Operator):
 
 				#Finish
 				#mesh.update(calc_edges=True)
-				mesh.validate(verbose=False) #return true if the mesh has been corrected
 				obj = bpy.data.objects.new(shpName, mesh)
 				context.scene.collection.objects.link(obj)
 				context.view_layer.objects.active = obj

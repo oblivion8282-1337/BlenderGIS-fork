@@ -466,39 +466,40 @@ def _get_uniform_shader():
 	return _cached_uniform_shader
 
 
+_rect_batch_cache = {}
+
 def drawRoundedRect(x, y, w, h, color, radius=6):
-	"""Draw a rectangle with rounded corners"""
+	"""Draw a rectangle with rounded corners. Batches are cached by geometry key."""
+	global _rect_batch_cache
+	key = (x, y, w, h, radius)
 	shader = _get_uniform_shader()
 	shader.bind()
 	shader.uniform_float("color", color)
-	# Simple approach: draw center rect + edge rects (good enough for small radius)
-	verts = [
-		(x + radius, y, 0), (x + w - radius, y, 0),
-		(x + radius, y + h, 0), (x + w - radius, y + h, 0),
-	]
-	batch = batch_for_shader(shader, 'TRI_STRIP', {"pos": verts})
-	batch.draw(shader)
-	# left edge
-	verts = [
-		(x, y + radius, 0), (x + radius, y + radius, 0),
-		(x, y + h - radius, 0), (x + radius, y + h - radius, 0),
-	]
-	batch = batch_for_shader(shader, 'TRI_STRIP', {"pos": verts})
-	batch.draw(shader)
-	# right edge
-	verts = [
-		(x + w - radius, y + radius, 0), (x + w, y + radius, 0),
-		(x + w - radius, y + h - radius, 0), (x + w, y + h - radius, 0),
-	]
-	batch = batch_for_shader(shader, 'TRI_STRIP', {"pos": verts})
-	batch.draw(shader)
-	# corners (small squares to approximate rounding)
-	for cx, cy in [(x, y), (x + w - radius, y), (x, y + h - radius), (x + w - radius, y + h - radius)]:
-		verts = [
-			(cx + 1, cy, 0), (cx + radius, cy, 0),
-			(cx, cy + 1, 0), (cx + radius, cy + radius, 0),
-		]
-		batch = batch_for_shader(shader, 'TRI_STRIP', {"pos": verts})
+	if key not in _rect_batch_cache:
+		batches = []
+		# Center rect
+		batches.append(batch_for_shader(shader, 'TRI_STRIP', {"pos": [
+			(x + radius, y, 0), (x + w - radius, y, 0),
+			(x + radius, y + h, 0), (x + w - radius, y + h, 0),
+		]}))
+		# Left edge
+		batches.append(batch_for_shader(shader, 'TRI_STRIP', {"pos": [
+			(x, y + radius, 0), (x + radius, y + radius, 0),
+			(x, y + h - radius, 0), (x + radius, y + h - radius, 0),
+		]}))
+		# Right edge
+		batches.append(batch_for_shader(shader, 'TRI_STRIP', {"pos": [
+			(x + w - radius, y + radius, 0), (x + w, y + radius, 0),
+			(x + w - radius, y + h - radius, 0), (x + w, y + h - radius, 0),
+		]}))
+		# Corners
+		for cx, cy in [(x, y), (x + w - radius, y), (x, y + h - radius), (x + w - radius, y + h - radius)]:
+			batches.append(batch_for_shader(shader, 'TRI_STRIP', {"pos": [
+				(cx + 1, cy, 0), (cx + radius, cy, 0),
+				(cx, cy + 1, 0), (cx + radius, cy + radius, 0),
+			]}))
+		_rect_batch_cache[key] = batches
+	for batch in _rect_batch_cache[key]:
 		batch.draw(shader)
 
 def _drawInfoOverlay(context):

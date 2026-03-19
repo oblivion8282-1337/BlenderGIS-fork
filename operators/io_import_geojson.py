@@ -26,16 +26,25 @@ LEVEL_HEIGHT = 3.0
 # Helpers
 # ---------------------------------------------------------------------------
 
-_join_buffer = None
-
 def _joinBmesh(src_bm, dest_bm):
-	"""Join one bmesh into another via a temporary mesh data-block."""
-	global _join_buffer
-	if _join_buffer is None or _join_buffer.name not in bpy.data.meshes:
-		_join_buffer = bpy.data.meshes.new(".geojson_temp")
-	src_bm.to_mesh(_join_buffer)
-	dest_bm.from_mesh(_join_buffer)
-	_join_buffer.clear_geometry()
+	"""Join src_bm into dest_bm using direct bmesh vertex/face/edge copying."""
+	vert_map = {}
+	for v in src_bm.verts:
+		new_v = dest_bm.verts.new(v.co)
+		vert_map[v.index] = new_v
+	dest_bm.verts.ensure_lookup_table()
+	for f in src_bm.faces:
+		try:
+			new_face = dest_bm.faces.new([vert_map[v.index] for v in f.verts])
+			new_face.material_index = f.material_index
+		except ValueError:
+			pass
+	for e in src_bm.edges:
+		if not e.link_faces:
+			try:
+				dest_bm.edges.new([vert_map[v.index] for v in e.verts])
+			except ValueError:
+				pass
 
 
 def _iter_geometries(geojson):
@@ -384,7 +393,6 @@ class IMPORTGIS_OT_geojson_file(Operator):
 				mesh = bpy.data.meshes.new(obj_name)
 				bm.to_mesh(mesh)
 				mesh.update()
-				mesh.validate()
 
 				obj = bpy.data.objects.new(obj_name, mesh)
 
@@ -453,7 +461,6 @@ class IMPORTGIS_OT_geojson_file(Operator):
 				bm.to_mesh(mesh)
 				bm.free()
 				mesh.update()
-				mesh.validate()
 
 				obj = bpy.data.objects.new(name, mesh)
 				scn.collection.objects.link(obj)

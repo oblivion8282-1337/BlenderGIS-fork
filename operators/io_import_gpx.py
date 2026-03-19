@@ -979,6 +979,21 @@ class IMPORTGIS_OT_gpx_file(Operator):
 
 _draw_handler = None
 
+# Module-level shader cache — avoids recreating the shader every frame
+_gpx_shader_cache = None
+
+
+def _get_gpx_shader():
+	global _gpx_shader_cache
+	if _gpx_shader_cache is not None:
+		try:
+			_gpx_shader_cache.bind()
+			return _gpx_shader_cache
+		except Exception:
+			_gpx_shader_cache = None
+	_gpx_shader_cache = gpu.shader.from_builtin('UNIFORM_COLOR')
+	return _gpx_shader_cache
+
 
 def _draw_gpx_overlay():
 	"""Draw all GPX routes as thick colored lines on top of the viewport."""
@@ -1025,18 +1040,24 @@ def _draw_gpx_overlay():
 	if not segments:
 		return
 
-	# Draw using GPU shader
-	shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+	# Build a single batch for all segments (one draw call instead of N)
+	all_verts = []
+	for seg in segments:
+		coords = [(p[0], p[1]) for p in seg]
+		for i in range(len(coords) - 1):
+			all_verts.append(coords[i])
+			all_verts.append(coords[i + 1])
+
+	if not all_verts:
+		return
+
+	shader = _get_gpx_shader()
 	gpu.state.blend_set('ALPHA')
 	gpu.state.line_width_set(4.0)
 
-	for pts_2d in segments:
-		coords = [(p[0], p[1]) for p in pts_2d]
-		indices = [(i, i + 1) for i in range(len(coords) - 1)]
-		batch = batch_for_shader(shader, 'LINES', {"pos": coords}, indices=indices)
-		shader.bind()
-		shader.uniform_float("color", (1.0, 0.3, 0.0, 0.9))  # orange
-		batch.draw(shader)
+	batch = batch_for_shader(shader, 'LINES', {"pos": all_verts})
+	shader.uniform_float("color", (1.0, 0.3, 0.0, 0.9))  # orange
+	batch.draw(shader)
 
 	gpu.state.line_width_set(1.0)
 	gpu.state.blend_set('NONE')

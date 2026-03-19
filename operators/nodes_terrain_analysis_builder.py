@@ -29,7 +29,7 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		#######################
 		# Create material
 		heightMatName = 'Height_' + obj.name
-		if heightMatName not in [m.name for m in bpy.data.materials]:
+		if bpy.data.materials.get(heightMatName) is None:
 			heightMat = bpy.data.materials.new(heightMatName)
 		else:#edit existing height material
 			heightMat = bpy.data.materials[heightMatName]
@@ -56,7 +56,7 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 			except:
 				print('cannot delete '+name)
 		'''
-		if 'Normalize' in [nodeTree.name for nodeTree in groupsTree]:
+		if groupsTree.get('Normalize') is not None:
 		   #groupsTree.remove(groupsTree['Normalize'])
 			scaleNodesGroupTree = groupsTree['Normalize']
 			scaleNodesGroupTree.nodes.clear()
@@ -139,7 +139,7 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		#######################
 		# Create material
 		slopeMatName = 'Slope'
-		if slopeMatName not in [m.name for m in bpy.data.materials]:
+		if bpy.data.materials.get(slopeMatName) is None:
 			slopeMat = bpy.data.materials.new(slopeMatName)
 		else:
 			slopeMat = bpy.data.materials[slopeMatName]
@@ -208,7 +208,7 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		#######################
 		# Create material
 		aspectMatName = 'Aspect'
-		if aspectMatName not in [m.name for m in bpy.data.materials]:
+		if bpy.data.materials.get(aspectMatName) is None:
 			aspectMat = bpy.data.materials.new(aspectMatName)
 		else:
 			aspectMat = bpy.data.materials[aspectMatName]
