@@ -275,6 +275,28 @@ class VIEW3D_PT_gis_map(bpy.types.Panel):
 				sub.operator("view3d.map_resume", icon='LOOP_FORWARDS', text="Resume")
 				sub.enabled = bpy.ops.view3d.map_resume.poll() if hasattr(bpy.ops.view3d, 'map_resume') else False
 
+			# ── Markers ──
+			from .geoscene import GeoScene
+			geoscn = GeoScene(context.scene)
+			if geoscn.isGeoref:
+				layout.separator()
+				layout.label(text="Markers", icon='EMPTY_AXIS')
+				row = layout.row(align=True)
+				row.prop(context.scene, 'gis_marker_query', text='', icon='VIEWZOOM')
+				row.operator("view3d.marker_add", icon='ADD', text="")
+				import sys
+				_mv3 = sys.modules.get(__package__ + '.operators.view3d_mapviewer')
+				if _mv3:
+					markers = _mv3._get_marker_objects(context.scene)
+					if markers:
+						box = layout.box()
+						for m in markers:
+							row = box.row(align=True)
+							op = row.operator("view3d.marker_select", text=m.name, icon='PINNED')
+							op.name = m.name
+							op2 = row.operator("view3d.marker_remove", text="", icon='X')
+							op2.name = m.name
+
 # ─── Scene ────────────────────────────────────────────────
 
 class VIEW3D_PT_gis_scene(bpy.types.Panel):

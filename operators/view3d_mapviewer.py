@@ -1818,6 +1818,135 @@ class VIEW3D_OT_map_exit(bpy.types.Operator):
 		return {'FINISHED'}
 
 
+MARKER_COLLECTION_NAME = 'Markers'
+
+def _get_or_create_marker_collection(scene):
+	"""Get or create the Markers collection in the scene."""
+	for col in scene.collection.children:
+		if col.name == MARKER_COLLECTION_NAME:
+			return col
+	col = bpy.data.collections.new(MARKER_COLLECTION_NAME)
+	scene.collection.children.link(col)
+	return col
+
+def _get_marker_objects(scene):
+	"""Return all marker empties in the Markers collection."""
+	for col in scene.collection.children:
+		if col.name == MARKER_COLLECTION_NAME:
+			return [obj for obj in col.objects if obj.type == 'EMPTY' and obj.get('_cartoblend_marker')]
+	return []
+
+
+class VIEW3D_OT_marker_add(bpy.types.Operator):
+	"""Add a location marker by searching for a place name"""
+
+	bl_idname = "view3d.marker_add"
+	bl_label = "Add Marker"
+	bl_description = 'Search for a location and place a marker empty'
+	bl_options = {'REGISTER', 'UNDO'}
+
+	def execute(self, context):
+		query = context.scene.gis_marker_query.strip()
+		if not query:
+			self.report({'INFO'}, "Please enter a location")
+			return {'CANCELLED'}
+
+		geoscn = GeoScene(context.scene)
+		if not geoscn.isGeoref:
+			self.report({'ERROR'}, "Scene must be georeferenced first (use Map Viewer)")
+			return {'CANCELLED'}
+
+		# Query Nominatim
+		try:
+			results = nominatimQuery(query, referer='bgis', user_agent=USER_AGENT)
+		except Exception as e:
+			log.error('Marker: Nominatim query failed', exc_info=True)
+			self.report({'ERROR'}, "Search failed: {}".format(e))
+			return {'CANCELLED'}
+
+		if not results:
+			self.report({'INFO'}, "No location found")
+			return {'CANCELLED'}
+
+		result = results[0]
+		lat = float(result['lat'])
+		lon = float(result['lon'])
+		display_name = result.get('display_name', query)
+		# Short name: first part before the first comma
+		short_name = display_name.split(',')[0].strip()
+
+		# Convert lat/lon to scene coordinates
+		from ..core.proj.reproj import reprojPt
+		x, y = reprojPt(4326, geoscn.crs, lon, lat)
+		vx, vy = geoscn.projToView3d(x, y)
+
+		# Create empty at location
+		marker_col = _get_or_create_marker_collection(context.scene)
+		empty = bpy.data.objects.new(short_name, None)
+		empty.empty_display_type = 'PLAIN_AXES'
+		empty.empty_display_size = 0.5
+		empty.location = (vx, vy, 0)
+		empty.show_name = True
+		empty['_cartoblend_marker'] = True
+		empty['marker_lat'] = lat
+		empty['marker_lon'] = lon
+		empty['marker_display_name'] = display_name
+		marker_col.objects.link(empty)
+
+		# Clear search field
+		context.scene.gis_marker_query = ""
+
+		self.report({'INFO'}, "Marker: {}".format(short_name))
+		return {'FINISHED'}
+
+
+class VIEW3D_OT_marker_remove(bpy.types.Operator):
+	"""Remove a location marker"""
+
+	bl_idname = "view3d.marker_remove"
+	bl_label = "Remove Marker"
+	bl_description = 'Remove this marker from the scene'
+	bl_options = {'REGISTER', 'UNDO'}
+
+	name: StringProperty()
+
+	def execute(self, context):
+		for col in context.scene.collection.children:
+			if col.name == MARKER_COLLECTION_NAME:
+				for obj in col.objects:
+					if obj.name == self.name and obj.get('_cartoblend_marker'):
+						bpy.data.objects.remove(obj, do_unlink=True)
+						return {'FINISHED'}
+		self.report({'WARNING'}, "Marker not found")
+		return {'CANCELLED'}
+
+
+class VIEW3D_OT_marker_select(bpy.types.Operator):
+	"""Select and zoom to a marker"""
+
+	bl_idname = "view3d.marker_select"
+	bl_label = "Select Marker"
+	bl_description = 'Select this marker and center the view on it'
+	bl_options = {'INTERNAL'}
+
+	name: StringProperty()
+
+	def execute(self, context):
+		for col in context.scene.collection.children:
+			if col.name == MARKER_COLLECTION_NAME:
+				for obj in col.objects:
+					if obj.name == self.name and obj.get('_cartoblend_marker'):
+						# Deselect all, select marker
+						bpy.ops.object.select_all(action='DESELECT')
+						obj.select_set(True)
+						context.view_layer.objects.active = obj
+						# Center view on marker
+						if context.region_data:
+							context.region_data.view_location = obj.location.copy()
+						return {'FINISHED'}
+		return {'CANCELLED'}
+
+
 classes = [
 	VIEW3D_OT_map_start,
 	VIEW3D_OT_map_viewer,
@@ -1828,6 +1957,9 @@ classes = [
 	VIEW3D_OT_map_resume,
 	VIEW3D_OT_map_export,
 	VIEW3D_OT_map_exit,
+	VIEW3D_OT_marker_add,
+	VIEW3D_OT_marker_remove,
+	VIEW3D_OT_marker_select,
 ]
 
 def register():
@@ -1856,6 +1988,11 @@ def register():
 		description="Resolved location from last search",
 		default=""
 	)
+	bpy.types.Scene.gis_marker_query = StringProperty(
+		name="Marker Search",
+		description="Search for a place to add a marker",
+		default=""
+	)
 	# Register persistent info overlay draw handler
 	global _overlay_draw_handler
 	if _overlay_draw_handler is None:
@@ -1868,6 +2005,8 @@ def unregister():
 	if _overlay_draw_handler is not None:
 		bpy.types.SpaceView3D.draw_handler_remove(_overlay_draw_handler, 'WINDOW')
 		_overlay_draw_handler = None
+	if hasattr(bpy.types.Scene, 'gis_marker_query'):
+		del bpy.types.Scene.gis_marker_query
 	if hasattr(bpy.types.Scene, 'gis_goto_result'):
 		del bpy.types.Scene.gis_goto_result
 	if hasattr(bpy.types.Scene, 'gis_goto_query'):
