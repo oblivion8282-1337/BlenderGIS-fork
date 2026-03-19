@@ -1001,6 +1001,8 @@ class VIEW3D_OT_map_viewer(Operator):
 		# tag if map is currently drag
 		self.inMove = False
 		self.x1, self.y1 = 0, 0
+		# cached parent objects for drag (built on PRESS, reused on MOUSEMOVE)
+		self._topParents = []
 		# mouse crs coordinates reported in draw callback
 		self.posx, self.posy = 0, 0
 		# thread progress infos reported in draw callback
@@ -1307,9 +1309,9 @@ class VIEW3D_OT_map_viewer(Operator):
 		if event.type == 'MOUSEMOVE':
 
 			#Report mouse location coords in projeted crs
-			loc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
-			if loc is not None:
-				self.posx, self.posy = self.map.view3dToProj(loc.x, loc.y)
+			mouseLoc = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
+			if mouseLoc is not None:
+				self.posx, self.posy = self.map.view3dToProj(mouseLoc.x, mouseLoc.y)
 
 			if self.zoomBoxMode:
 				self.zb_xmax, self.zb_ymax = event.mouse_region_x, event.mouse_region_y
@@ -1319,8 +1321,8 @@ class VIEW3D_OT_map_viewer(Operator):
 			if self.inMove:
 				needs_redraw = True  # map is being dragged
 				loc1 = mouseTo3d(context, self.x1, self.y1)
-				loc2 = mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
-				dlt = loc1 - loc2
+				# Reuse mouseLoc from above instead of calling mouseTo3d again
+				dlt = loc1 - mouseLoc if mouseLoc is not None else loc1 - mouseTo3d(context, event.mouse_region_x, event.mouse_region_y)
 				if event.ctrl or self.prefs.lockOrigin:
 					context.region_data.view_location = self.viewLoc1 + dlt
 				else:
@@ -1328,17 +1330,11 @@ class VIEW3D_OT_map_viewer(Operator):
 					if self.map.bkg is not None:
 						self.map.bkg.location[0] = self.offx1 - dlt.x
 						self.map.bkg.location[1] = self.offy1 - dlt.y
-					#Move existing objects (only top level parent)
+					#Move existing objects (use cached parent list from PRESS)
 					if self.updObjLoc:
-						topParents = [obj for obj in scn.objects if not obj.parent]
-						j = 0
-						for obj in topParents:
-							if obj == self.map.bkg: #the background empty used as basemap
-								continue
-							loc1 = self.objsLoc1[j]
-							obj.location.x = loc1.x - dlt.x
-							obj.location.y = loc1.y - dlt.y
-							j += 1
+						for obj, orig_loc in zip(self._topParents, self.objsLoc1):
+							obj.location.x = orig_loc.x - dlt.x
+							obj.location.y = orig_loc.y - dlt.y
 
 
 		if event.type in {'LEFTMOUSE', 'MIDDLEMOUSE'}:
@@ -1354,8 +1350,9 @@ class VIEW3D_OT_map_viewer(Operator):
 						if self.map.bkg is not None:
 							self.offx1 = self.map.bkg.location[0]
 							self.offy1 = self.map.bkg.location[1]
-						#Store current location of each objects (only top level parent, excluding bkg)
-						self.objsLoc1 = [obj.location.copy() for obj in scn.objects if not obj.parent and obj != self.map.bkg]
+						#Cache top-level parent objects and their locations (reused during drag)
+						self._topParents = [obj for obj in scn.objects if not obj.parent and obj != self.map.bkg]
+						self.objsLoc1 = [obj.location.copy() for obj in self._topParents]
 				#Tag that map is currently draging
 				self.inMove = True
 				needs_redraw = True
