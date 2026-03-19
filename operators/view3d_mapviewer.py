@@ -1232,6 +1232,8 @@ class VIEW3D_OT_map_viewer(Operator):
 		needs_redraw = False
 
 		if event.type in ['WHEELUPMOUSE', 'NUMPAD_PLUS']:
+			if context.region_data is None:
+				return {'PASS_THROUGH'}
 
 			if event.value == 'PRESS':
 				needs_redraw = True
@@ -1283,6 +1285,8 @@ class VIEW3D_OT_map_viewer(Operator):
 
 
 		if event.type in ['WHEELDOWNMOUSE', 'NUMPAD_MINUS']:
+			if context.region_data is None:
+				return {'PASS_THROUGH'}
 
 			if event.value == 'PRESS':
 				needs_redraw = True
