@@ -225,7 +225,7 @@ def _get_or_create_building_geonodes():
 	n_ext_roof.location = (800, 0)
 	n_ext_roof.inputs['Individual'].default_value = True
 	links.new(n_setmat.outputs['Geometry'], n_ext_roof.inputs['Mesh'])
-	links.new(n_roof_and.outputs['Result'], n_ext_roof.inputs['Selection'])
+	links.new(n_roof_and.outputs[0], n_ext_roof.inputs['Selection'])
 	links.new(n_roof_xyz.outputs['Vector'], n_ext_roof.inputs['Offset'])
 
 	# Scale the new roof-top faces inward to create a peak
