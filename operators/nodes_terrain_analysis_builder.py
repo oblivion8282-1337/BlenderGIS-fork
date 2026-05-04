@@ -19,11 +19,14 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 
 	def execute(self, context):
 		scn = context.scene
-		scn.render.engine = 'CYCLES' #force Cycles render
 		obj = context.view_layer.objects.active
 		if obj is None:
 			self.report({'ERROR'}, "No active object")
 			return {'CANCELLED'}
+		if obj.type != 'MESH':
+			self.report({'ERROR'}, "Active object must be a mesh (got {})".format(obj.type))
+			return {'CANCELLED'}
+		scn.render.engine = 'CYCLES' #force Cycles render
 		#######################
 		#HEIGHT
 		#######################

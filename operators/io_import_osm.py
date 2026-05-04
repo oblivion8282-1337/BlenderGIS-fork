@@ -1658,6 +1658,16 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 			self.report({'ERROR'}, "Please select at least one category")
 			return {'CANCELLED'}
 
+		#OSMTAGS feeds the dynamic enumTags callback that backs filterTags. invoke()
+		#populates it; for EXEC_DEFAULT (no invoke) we need to populate here too,
+		#otherwise setting self.filterTags fails because the enum has no items.
+		global OSMTAGS
+		OSMTAGS = getTags()
+		for cat in OSM_CATEGORIES.values():
+			for t in cat['tags']:
+				if t not in OSMTAGS:
+					OSMTAGS.append(t)
+
 		#Set the inherited filterTags and featureType so build() works correctly
 		self.filterTags = tags
 		self.featureType = types
