@@ -1974,8 +1974,18 @@ def register():
 			bpy.utils.register_class(cls)
 	# Scene properties for inline "Go to Location" input in N-Panel
 	def _on_goto_query_confirm(self, context):
-		if self.gis_goto_query.strip():
-			bpy.ops.view3d.map_goto('EXEC_DEFAULT')
+		if not self.gis_goto_query.strip():
+			return
+		#Property update callbacks have no VIEW_3D area in context, so map_start.invoke
+		#would bail with "View3D not found". Override with the first VIEW_3D area found.
+		for win in bpy.context.window_manager.windows:
+			for area in win.screen.areas:
+				if area.type == 'VIEW_3D':
+					region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+					if region is not None:
+						with bpy.context.temp_override(window=win, area=area, region=region):
+							bpy.ops.view3d.map_goto('EXEC_DEFAULT')
+						return
 	bpy.types.Scene.gis_goto_query = StringProperty(
 		name="Location",
 		description="Search for a place name or address",
