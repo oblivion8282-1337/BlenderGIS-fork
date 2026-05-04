@@ -1729,21 +1729,11 @@ class VIEW3D_OT_map_goto(bpy.types.Operator):
 				name = name[:57] + '...'
 			self.report({'INFO'}, name)
 		else:
-			#Pick source/layer/grid: prefer last used, else N-panel selection.
-			if _last_map_src is not None:
-				srckey, laykey, grdkey = _last_map_src, _last_map_lay, _last_map_grd
-			else:
-				settings = context.scene.gis_basemap
-				srckey = settings.src
-				if not srckey:
-					srckey = next(iter(SOURCES))
-				laykey = settings.lay
-				if not laykey or laykey not in SOURCES[srckey]['layers']:
-					laykey = next(iter(SOURCES[srckey]['layers']))
-				grdkey = SOURCES[srckey]['grid']
-			bpy.ops.view3d.map_viewer('INVOKE_DEFAULT',
-				srckey=srckey, laykey=laykey, grdkey=grdkey,
-				recenter=False)
+			#Map viewer is not running. Route through map_start so that all
+			#init work happens (CRS check, _last_map_src tracking, view_distance
+			#derived from zoom). map_start.invoke with dialog='MAP' reads
+			#source/layer from the N-panel and goes straight to execute().
+			bpy.ops.view3d.map_start('INVOKE_DEFAULT', dialog='MAP')
 
 		return {'FINISHED'}
 
