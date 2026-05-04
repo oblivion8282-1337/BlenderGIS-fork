@@ -38,8 +38,39 @@ OSMTAGS = []
 
 
 
-closedWaysArePolygons = ['aeroway', 'amenity', 'boundary', 'building', 'craft', 'geological', 'historic', 'landuse', 'leisure', 'military', 'natural', 'office', 'place', 'shop' , 'sport', 'tourism']
-closedWaysAreExtruded = ['building']
+closedWaysArePolygons = ['aeroway', 'amenity', 'boundary', 'building', 'building:part', 'craft', 'geological', 'historic', 'landuse', 'leisure', 'military', 'natural', 'office', 'place', 'shop' , 'sport', 'tourism']
+closedWaysAreExtruded = ['building', 'building:part']
+
+# Simple 3D Buildings (S3DB) — https://wiki.openstreetmap.org/wiki/Simple_3D_Buildings
+ROOF_SHAPE_MAP = {
+	'flat': 0,
+	'gabled': 1, 'gambrel': 1,
+	'hipped': 2, 'half-hipped': 2,
+	'pyramidal': 3,
+	'skillion': 4, 'saltbox': 4,
+	'mansard': 5,
+	'dome': 6,
+	'onion': 7,
+	'round': 8,
+}
+
+
+def _parseMeters(val):
+	"""Parse an OSM length string (e.g. '12', '12.5 m', '12,5m') to float meters. Returns None on failure."""
+	if val is None:
+		return None
+	s = str(val).replace(',', '.').strip()
+	if s.endswith('m'):
+		s = s[:-1].strip()
+	# Strip any trailing unit chars
+	for i, c in enumerate(s):
+		if not (c.isdigit() or c == '.' or c == '-'):
+			s = s[:i].strip()
+			break
+	try:
+		return float(s)
+	except ValueError:
+		return None
 
 #Street width by highway type (meters)
 HIGHWAY_WIDTHS = {
@@ -76,14 +107,14 @@ def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'rela
 		#all tagged nodes
 		if 'node' in types:
 			if tags:
-				union += ';'.join( ['node['+tag+']' for tag in tags] ) + ';'
+				union += ';'.join( ['node["'+tag+'"]' for tag in tags] ) + ';'
 			else:
 				union += 'node;'
 		#all tagged ways with all their nodes (recurse down)
 		if 'way' in types:
 			union += '(('
 			if tags:
-				union += ';'.join( ['way['+tag+']' for tag in tags] ) + ';);'
+				union += ';'.join( ['way["'+tag+'"]' for tag in tags] ) + ';);'
 			else:
 				union += 'way;);'
 			union += '>;);'
@@ -104,10 +135,12 @@ def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'rela
 ########################
 
 def _get_or_create_building_geonodes():
-	"""Create a Geometry Nodes group for building extrusion from 'height' attribute.
-	Stores a per-building random ID before extrusion (for consistent shader variation),
-	and assigns material index 1 to extruded side faces."""
-	name = 'OSM Building Extrusion'
+	"""Create a Geometry Nodes group for S3DB-aware building extrusion.
+	Reads per-face attributes 'height', 'min_height', 'roof_shape', 'roof_height';
+	translates each footprint up by min_height, extrudes by (height - min_height),
+	then optionally extrudes a peaked roof. Stores a per-building random ID before
+	extrusion for consistent shader variation."""
+	name = 'OSM Building Extrusion v2'
 	if name in bpy.data.node_groups:
 		return bpy.data.node_groups[name]
 
@@ -126,56 +159,84 @@ def _get_or_create_building_geonodes():
 
 	# Group Input / Output
 	n_in = nodes.new('NodeGroupInput')
-	n_in.location = (-600, 0)
+	n_in.location = (-800, 0)
 	n_out = nodes.new('NodeGroupOutput')
-	n_out.location = (600, 0)
 
 	# --- Store per-building random ID (before extrusion, each face = one building) ---
 	n_random = nodes.new('FunctionNodeRandomValue')
 	n_random.data_type = 'FLOAT'
-	n_random.location = (-450, -350)
+	n_random.location = (-650, -350)
 	n_random.inputs[8].default_value = 42  # Seed
 
 	n_store_id = nodes.new('GeometryNodeStoreNamedAttribute')
 	n_store_id.data_type = 'FLOAT'
 	n_store_id.domain = 'FACE'
-	n_store_id.location = (-250, 0)
+	n_store_id.location = (-450, 0)
 	n_store_id.inputs[2].default_value = "building_id"  # Name
 	links.new(n_in.outputs['Geometry'], n_store_id.inputs[0])  # Geometry
 	links.new(n_random.outputs[1], n_store_id.inputs[3])  # Value (float output)
 
-	# Named Attribute → read "height" per face
-	n_attr = nodes.new('GeometryNodeInputNamedAttribute')
-	n_attr.data_type = 'FLOAT'
-	n_attr.inputs['Name'].default_value = 'height'
-	n_attr.location = (-600, -200)
+	# Named Attribute → read "height" (top, absolute) per face
+	n_attr_h = nodes.new('GeometryNodeInputNamedAttribute')
+	n_attr_h.data_type = 'FLOAT'
+	n_attr_h.inputs['Name'].default_value = 'height'
+	n_attr_h.location = (-800, -200)
 
-	# Multiply height by multiplier
-	n_mult = nodes.new('ShaderNodeMath')
-	n_mult.operation = 'MULTIPLY'
-	n_mult.location = (-100, -150)
-	links.new(n_attr.outputs['Attribute'], n_mult.inputs[0])
-	links.new(n_in.outputs['Height Multiplier'], n_mult.inputs[1])
+	# Named Attribute → read "min_height" (bottom of part above ground) per face
+	n_attr_mh = nodes.new('GeometryNodeInputNamedAttribute')
+	n_attr_mh.data_type = 'FLOAT'
+	n_attr_mh.inputs['Name'].default_value = 'min_height'
+	n_attr_mh.location = (-800, -350)
 
-	# Combine XYZ → offset vector (0, 0, height)
+	# Wall thickness = (height - min_height) * multiplier
+	n_thick = nodes.new('ShaderNodeMath')
+	n_thick.operation = 'SUBTRACT'
+	n_thick.location = (-550, -200)
+	links.new(n_attr_h.outputs['Attribute'], n_thick.inputs[0])
+	links.new(n_attr_mh.outputs['Attribute'], n_thick.inputs[1])
+
+	n_thick_mult = nodes.new('ShaderNodeMath')
+	n_thick_mult.operation = 'MULTIPLY'
+	n_thick_mult.location = (-350, -200)
+	links.new(n_thick.outputs[0], n_thick_mult.inputs[0])
+	links.new(n_in.outputs['Height Multiplier'], n_thick_mult.inputs[1])
+
+	# Base offset = min_height * multiplier (translates footprint up before extrude)
+	n_base_mult = nodes.new('ShaderNodeMath')
+	n_base_mult.operation = 'MULTIPLY'
+	n_base_mult.location = (-350, -350)
+	links.new(n_attr_mh.outputs['Attribute'], n_base_mult.inputs[0])
+	links.new(n_in.outputs['Height Multiplier'], n_base_mult.inputs[1])
+
+	n_base_xyz = nodes.new('ShaderNodeCombineXYZ')
+	n_base_xyz.location = (-150, -350)
+	links.new(n_base_mult.outputs[0], n_base_xyz.inputs['Z'])
+
+	# Translate input footprint up by base offset (before extrusion)
+	n_setpos = nodes.new('GeometryNodeSetPosition')
+	n_setpos.location = (50, 0)
+	links.new(n_store_id.outputs[0], n_setpos.inputs['Geometry'])
+	links.new(n_base_xyz.outputs['Vector'], n_setpos.inputs['Offset'])
+
+	# Extrusion offset vector = (0, 0, thickness)
 	n_xyz = nodes.new('ShaderNodeCombineXYZ')
-	n_xyz.location = (50, -150)
-	links.new(n_mult.outputs[0], n_xyz.inputs['Z'])
+	n_xyz.location = (-150, -200)
+	links.new(n_thick_mult.outputs[0], n_xyz.inputs['Z'])
 
-	# Selection: only extrude faces where height > 0
+	# Selection: only extrude where wall thickness > 0
 	n_gt = nodes.new('FunctionNodeCompare')
 	n_gt.data_type = 'FLOAT'
 	n_gt.operation = 'GREATER_THAN'
-	n_gt.location = (-100, -300)
-	links.new(n_attr.outputs['Attribute'], n_gt.inputs['A'])
+	n_gt.location = (-150, -500)
+	links.new(n_thick.outputs[0], n_gt.inputs['A'])
 	n_gt.inputs['B'].default_value = 0.0
 
 	# Extrude Mesh (Individual Faces)
 	n_ext = nodes.new('GeometryNodeExtrudeMesh')
 	n_ext.mode = 'FACES'
-	n_ext.location = (200, 0)
+	n_ext.location = (250, 0)
 	n_ext.inputs['Individual'].default_value = True
-	links.new(n_store_id.outputs[0], n_ext.inputs['Mesh'])  # From Store Named Attribute
+	links.new(n_setpos.outputs['Geometry'], n_ext.inputs['Mesh'])
 	links.new(n_gt.outputs['Result'], n_ext.inputs['Selection'])
 	links.new(n_xyz.outputs['Vector'], n_ext.inputs['Offset'])
 
@@ -214,10 +275,17 @@ def _get_or_create_building_geonodes():
 	links.new(n_rs_gt.outputs['Result'], n_roof_and.inputs[0])
 	links.new(n_ext.outputs['Top'], n_roof_and.inputs[1])
 
-	# Combine XYZ for roof offset (0, 0, roof_height)
+	# Roof height × multiplier (keep building proportions)
+	n_roof_mult = nodes.new('ShaderNodeMath')
+	n_roof_mult.operation = 'MULTIPLY'
+	n_roof_mult.location = (600, -550)
+	links.new(n_roof_height.outputs['Attribute'], n_roof_mult.inputs[0])
+	links.new(n_in.outputs['Height Multiplier'], n_roof_mult.inputs[1])
+
+	# Combine XYZ for roof offset (0, 0, roof_height * multiplier)
 	n_roof_xyz = nodes.new('ShaderNodeCombineXYZ')
-	n_roof_xyz.location = (600, -550)
-	links.new(n_roof_height.outputs['Attribute'], n_roof_xyz.inputs['Z'])
+	n_roof_xyz.location = (780, -550)
+	links.new(n_roof_mult.outputs[0], n_roof_xyz.inputs['Z'])
 
 	# Second Extrude: push top faces up by roof_height
 	n_ext_roof = nodes.new('GeometryNodeExtrudeMesh')
@@ -785,6 +853,29 @@ class OSM_IMPORT():
 		bmeshes = {}
 		vgroupsObj = {}
 
+		# S3DB: identify building outlines whose geometry should not be extruded because
+		# they have building:part siblings via a type=building relation. The parts carry
+		# the 3D geometry; the outline is metadata.
+		outline_skip_ids = set()
+		ways_by_id = {w.id: w for w in result.ways}
+		for rel in result.relations:
+			if rel.tags.get('type') != 'building':
+				continue
+			rel_outlines = []
+			has_part = False
+			for m in rel.members:
+				ref = getattr(m, 'ref', None)
+				role = getattr(m, 'role', '') or ''
+				w = ways_by_id.get(ref)
+				if w is None:
+					continue
+				if role == 'part' or 'building:part' in w.tags:
+					has_part = True
+				elif role == 'outline' or ('building' in w.tags and 'building:part' not in w.tags):
+					rel_outlines.append(ref)
+			if has_part:
+				outline_skip_ids.update(rel_outlines)
+
 		#######
 		def seed(id, tags, pts, extags):
 			'''
@@ -832,8 +923,10 @@ class OSM_IMPORT():
 				is_street = not closed and 'highway' in tags
 				if is_building:
 					height_layer = bm.faces.layers.float.new('height')
+					min_height_layer = bm.faces.layers.float.new('min_height')
 					roof_shape_layer = bm.faces.layers.int.new('roof_shape')
 					roof_height_layer = bm.faces.layers.float.new('roof_height')
+					roof_direction_layer = bm.faces.layers.float.new('roof_direction')
 				if is_street:
 					width_layer = bm.verts.layers.float.new('width')
 
@@ -849,62 +942,73 @@ class OSM_IMPORT():
 					if face.normal.z < 0:
 						face.normal_flip()
 
-					#Store height as face attribute for Geometry Nodes extrusion
+					#Store S3DB attributes per face for Geometry Nodes extrusion
 					if is_building:
-						offset = None
-						if "height" in tags:
-								htag = tags["height"]
-								htag = htag.replace(',', '.')
-								try:
-									offset = int(htag)
-								except ValueError:
-									try:
-										offset = float(htag)
-									except ValueError:
-										for i, c in enumerate(htag):
-											if not c.isdigit():
-												try:
-													offset, unit = float(htag[:i]), htag[i:].strip()
-												except ValueError:
-													offset = None
-						elif "building:levels" in tags:
+						# Top height (absolute, from ground)
+						top_h = _parseMeters(tags.get('height'))
+						if top_h is None and 'building:levels' in tags:
 							try:
-								offset = int(tags["building:levels"]) * self.levelHeight
-							except ValueError as e:
-								offset = None
+								top_h = float(str(tags['building:levels']).replace(',', '.')) * self.levelHeight
+							except ValueError:
+								pass
+						# building:part outlines without explicit height fall back to outline default;
+						# only randomize the default for plain `building` ways.
+						is_part = 'building:part' in tags
+						if top_h is None:
+							if is_part:
+								# parts without explicit height are skipped (would otherwise dwarf the outline)
+								top_h = 0.0
+							else:
+								minH = max(0, self.defaultHeight - self.randomHeightThreshold)
+								maxH = self.defaultHeight + self.randomHeightThreshold
+								top_h = float(random.randint(int(minH), int(maxH)))
 
-						if offset is None:
-							minH = self.defaultHeight - self.randomHeightThreshold
-							if minH < 0 :
-								minH = 0
-							maxH = self.defaultHeight + self.randomHeightThreshold
-							offset = random.randint(int(minH), int(maxH))
+						# Bottom height (S3DB min_height / building:min_level)
+						min_h = _parseMeters(tags.get('min_height'))
+						if min_h is None and 'building:min_level' in tags:
+							try:
+								min_h = float(str(tags['building:min_level']).replace(',', '.')) * self.levelHeight
+							except ValueError:
+								pass
+						if min_h is None:
+							min_h = 0.0
+						# Clamp: bottom can't exceed top
+						if min_h > top_h:
+							min_h = top_h
 
-						face[height_layer] = float(offset)
+						# Outline that has parts in same building relation: don't extrude (parts carry geometry)
+						if id in outline_skip_ids:
+							top_h = 0.0
+							min_h = 0.0
 
-						# --- Roof shape ---
-						_roof_shape_map = {
-							'flat': 0,
-							'gabled': 1,
-							'hipped': 2,
-							'pyramidal': 3,
-							'skillion': 4,
-						}
-						_rs_tag = tags.get('roof:shape', 'flat')
-						_rs_int = _roof_shape_map.get(_rs_tag, 0)
+						face[height_layer] = float(top_h)
+						face[min_height_layer] = float(min_h)
+
+						# Roof shape (extended S3DB enum)
+						_rs_int = ROOF_SHAPE_MAP.get(tags.get('roof:shape', 'flat'), 0)
 						face[roof_shape_layer] = _rs_int
 
-						# --- Roof height ---
-						_rh = None
-						if 'roof:height' in tags:
+						# Roof height (absolute meters; falls back to roof:levels, then 30% of wall thickness)
+						_rh = _parseMeters(tags.get('roof:height'))
+						if _rh is None and 'roof:levels' in tags:
 							try:
-								_rh = float(tags['roof:height'].replace(',', '.').replace('m', '').strip())
+								_rh = float(str(tags['roof:levels']).replace(',', '.')) * self.levelHeight
 							except ValueError:
-								_rh = None
+								pass
 						if _rh is None:
-							# Default: 30% of building height for non-flat roofs, 0 for flat
-							_rh = float(offset) * 0.3 if _rs_int > 0 else 0.0
-						face[roof_height_layer] = _rh
+							_rh = max(0.0, top_h - min_h) * 0.3 if _rs_int > 0 else 0.0
+						face[roof_height_layer] = float(_rh)
+
+						# Roof direction (degrees). roof:orientation along/across is bbox-relative;
+						# we approximate as 0/90 since per-face bbox alignment isn't computed yet.
+						_rd = 0.0
+						if 'roof:direction' in tags:
+							_rd_parsed = _parseMeters(str(tags['roof:direction']).replace('°', ''))
+							if _rd_parsed is not None:
+								_rd = _rd_parsed
+						elif tags.get('roof:orientation') == 'across':
+							_rd = 90.0
+						face[roof_direction_layer] = float(_rd)
 
 
 				elif len(pts) > 1: #edge
@@ -988,11 +1092,14 @@ class OSM_IMPORT():
 
 					if self.filterTags:
 
-						#group by tags (there could be some duplicates)
+						#group by tags (there could be some duplicates).
+						#building:part is semantically part of the building grouping;
+						#merge it into the same object as outline ways for organisational sanity.
 						for k in self.filterTags:
 
 							if k in extags:
-								objName = type + ':' + k
+								groupKey = 'building' if k == 'building:part' else k
+								objName = type + ':' + groupKey
 								kbm = bmeshes.setdefault(objName, bmesh.new())
 								_ensure_dest_layers(bm, kbm)
 								offset = len(kbm.verts)
@@ -1252,7 +1359,7 @@ class IMPORTGIS_OT_osm_file(Operator, OSM_IMPORT):
 OSM_CATEGORIES = {
 	'buildings': {
 		'label': 'Buildings',
-		'tags': ['building'],
+		'tags': ['building', 'building:part'],
 		'types': ['way', 'relation'],
 		'default': True,
 	},
@@ -1310,6 +1417,12 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 		#workaround to enum callback bug (T48873, T38489)
 		global OSMTAGS
 		OSMTAGS = getTags()
+		#Categories may need additional tags (e.g. building:part) that aren't in user prefs;
+		#extend OSMTAGS so filterTags EnumProperty can hold them.
+		for cat in OSM_CATEGORIES.values():
+			for t in cat['tags']:
+				if t not in OSMTAGS:
+					OSMTAGS.append(t)
 		return context.window_manager.invoke_props_dialog(self)
 
 	def draw(self, context):
@@ -1452,7 +1565,7 @@ def _get_building_objects():
 		return _building_objects_cache
 	_building_objects_cache = [obj for obj in bpy.data.objects
 			if obj.type == 'MESH'
-			and any(m.type == 'NODES' and m.node_group and m.node_group.name == 'OSM Building Extrusion'
+			and any(m.type == 'NODES' and m.node_group and m.node_group.name.startswith('OSM Building Extrusion')
 					for m in obj.modifiers)]
 	_building_objects_time = now
 	return _building_objects_cache
