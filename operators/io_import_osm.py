@@ -72,6 +72,75 @@ def _parseMeters(val):
 	except ValueError:
 		return None
 
+
+# Material classes drive the facade/roof shader switch (smooth stone vs windowed
+# residential vs reflective glass etc.). 0 = default = unmapped, keeps current
+# residential window-grid behavior.
+BUILDING_MATERIAL_MAP = {
+	'sandstone': 1, 'limestone': 1, 'marble': 1, 'granite': 1, 'stone': 1,
+	'brick': 2, 'bricks': 2, 'red_brick': 2,
+	'concrete': 3, 'cement_block': 3, 'plaster': 3, 'stucco': 3, 'cement': 3,
+	'glass': 4, 'mirror': 4,
+	'wood': 5, 'timber_framing': 5, 'half_timbered': 5,
+	'metal': 6, 'steel': 6, 'aluminium': 6, 'aluminum': 6, 'copper': 6, 'zinc': 6,
+}
+
+ROOF_MATERIAL_MAP = {
+	'roof_tiles': 1, 'tile': 1, 'tiles': 1,
+	'slate': 2,
+	'copper': 3,
+	'zinc': 4, 'metal_sheet': 4, 'metal': 4, 'tin': 4, 'aluminium': 4,
+	'thatch': 5,
+	'concrete': 6, 'cement': 6, 'eternit': 6,
+	'glass': 7,
+	'wood': 8, 'shingle': 8, 'wood_shingle': 8, 'asphalt_shingle': 8,
+}
+
+# Pragmatic CSS subset; OSM building:colour mostly uses #hex anyway.
+_NAMED_COLORS = {
+	'white': (1.00, 1.00, 1.00), 'whitesmoke': (0.96, 0.96, 0.96),
+	'black': (0.00, 0.00, 0.00),
+	'red': (0.86, 0.10, 0.10), 'darkred': (0.55, 0.00, 0.00), 'firebrick': (0.70, 0.13, 0.13),
+	'crimson': (0.86, 0.08, 0.24), 'salmon': (0.98, 0.50, 0.45), 'tomato': (1.00, 0.39, 0.28),
+	'maroon': (0.50, 0.00, 0.00),
+	'orange': (1.00, 0.65, 0.00), 'darkorange': (1.00, 0.55, 0.00),
+	'yellow': (1.00, 1.00, 0.00), 'gold': (1.00, 0.84, 0.00), 'khaki': (0.94, 0.90, 0.55),
+	'green': (0.00, 0.50, 0.00), 'darkgreen': (0.00, 0.39, 0.00),
+	'lightgreen': (0.56, 0.93, 0.56), 'palegreen': (0.60, 0.98, 0.60), 'lime': (0.00, 1.00, 0.00),
+	'olive': (0.50, 0.50, 0.00),
+	'blue': (0.00, 0.00, 1.00), 'lightblue': (0.68, 0.85, 0.90),
+	'darkblue': (0.00, 0.00, 0.55), 'navy': (0.00, 0.00, 0.50), 'royalblue': (0.25, 0.41, 0.88),
+	'cyan': (0.00, 1.00, 1.00), 'aqua': (0.00, 1.00, 1.00), 'teal': (0.00, 0.50, 0.50),
+	'turquoise': (0.25, 0.88, 0.82),
+	'purple': (0.50, 0.00, 0.50), 'magenta': (1.00, 0.00, 1.00), 'fuchsia': (1.00, 0.00, 1.00),
+	'pink': (1.00, 0.75, 0.80),
+	'brown': (0.65, 0.16, 0.16), 'saddlebrown': (0.55, 0.27, 0.07),
+	'gray': (0.50, 0.50, 0.50), 'grey': (0.50, 0.50, 0.50),
+	'lightgray': (0.83, 0.83, 0.83), 'lightgrey': (0.83, 0.83, 0.83),
+	'darkgray': (0.66, 0.66, 0.66), 'darkgrey': (0.66, 0.66, 0.66),
+	'silver': (0.75, 0.75, 0.75),
+	'tan': (0.82, 0.71, 0.55), 'beige': (0.96, 0.96, 0.86), 'cream': (1.00, 0.99, 0.82),
+	'wheat': (0.96, 0.87, 0.70), 'sandstone': (0.76, 0.70, 0.50),
+}
+
+
+def _parseColour(val):
+	"""Parse OSM colour tag to (r,g,b) floats in 0..1. Accepts '#rrggbb', '#rgb', or named CSS-ish color. Returns None on failure."""
+	if not val:
+		return None
+	s = str(val).strip().lower()
+	if s.startswith('#'):
+		hx = s[1:]
+		if len(hx) == 3:
+			hx = ''.join(c*2 for c in hx)
+		if len(hx) == 6:
+			try:
+				return (int(hx[0:2], 16)/255.0, int(hx[2:4], 16)/255.0, int(hx[4:6], 16)/255.0)
+			except ValueError:
+				return None
+		return None
+	return _NAMED_COLORS.get(s)
+
 #Street width by highway type (meters)
 HIGHWAY_WIDTHS = {
 	'motorway': 12, 'motorway_link': 8,
@@ -337,10 +406,21 @@ def _get_or_create_rooftop_material():
 
 
 def _get_or_create_facade_material():
-	"""Create the procedural facade shader (slot 1) with tangent-projected window grid.
-	Uses True Normal for correct projection on all wall orientations,
-	and FLOORED_MODULO to handle negative coordinate values."""
-	name = 'OSM_Facade_Procedural'
+	"""Tag-aware procedural facade shader.
+
+	Reads per-face attributes written during OSM import:
+	  - building_material (INT enum from BUILDING_MATERIAL_MAP)
+	  - building_colour_r/g/b (FLOAT, 0 if unset)
+	  - building_id (FLOAT, per-building random for variation)
+
+	Behavior by material class:
+	  - default (0)      → tangent-projected window grid (residential look)
+	  - stone/brick/concrete/wood (1,2,3,5) → uniform smooth wall, no windows
+	  - glass (4)        → dark glass with low roughness everywhere
+	  - metal (6)        → metallic with low roughness
+
+	building:colour overrides the material's default base color when set."""
+	name = 'OSM_Facade_Procedural_v2'
 	if name in bpy.data.materials:
 		return bpy.data.materials[name]
 
@@ -348,136 +428,196 @@ def _get_or_create_facade_material():
 	mat.use_nodes = True
 	tree = mat.node_tree
 	tree.nodes.clear()
+	n = tree.nodes
+	L = tree.links
 
-	# --- Core nodes ---
-	n_output = tree.nodes.new('ShaderNodeOutputMaterial')
-	n_output.location = (1100, 0)
+	# --- Core BSDF + Output ---
+	n_output = n.new('ShaderNodeOutputMaterial');  n_output.location = (1700, 0)
+	n_bsdf   = n.new('ShaderNodeBsdfPrincipled');  n_bsdf.location   = (1500, 0)
+	L.new(n_bsdf.outputs['BSDF'], n_output.inputs['Surface'])
 
-	n_bsdf = tree.nodes.new('ShaderNodeBsdfPrincipled')
-	n_bsdf.location = (900, 0)
-	tree.links.new(n_bsdf.outputs['BSDF'], n_output.inputs['Surface'])
+	# --- Per-face attributes ---
+	n_attr_mat = n.new('ShaderNodeAttribute'); n_attr_mat.location = (-1100,  500)
+	n_attr_mat.attribute_name = 'building_material'
+	n_attr_r   = n.new('ShaderNodeAttribute'); n_attr_r.location   = (-1100,  350)
+	n_attr_r.attribute_name   = 'building_colour_r'
+	n_attr_g   = n.new('ShaderNodeAttribute'); n_attr_g.location   = (-1100,  220)
+	n_attr_g.attribute_name   = 'building_colour_g'
+	n_attr_b   = n.new('ShaderNodeAttribute'); n_attr_b.location   = (-1100,   90)
+	n_attr_b.attribute_name   = 'building_colour_b'
+	n_attr_id  = n.new('ShaderNodeAttribute'); n_attr_id.location  = (-1100,  -50)
+	n_attr_id.attribute_name  = 'building_id'
 
-	# Geometry → True Normal
-	n_geom = tree.nodes.new('ShaderNodeNewGeometry')
-	n_geom.location = (-800, 200)
+	# --- Material flag helpers: is_X = abs(mat - X) < 0.5 ---
+	def _flag(target, y):
+		n_sub = n.new('ShaderNodeMath'); n_sub.operation = 'SUBTRACT'
+		n_sub.location = (-850, y); n_sub.inputs[1].default_value = float(target)
+		L.new(n_attr_mat.outputs['Fac'], n_sub.inputs[0])
+		n_abs = n.new('ShaderNodeMath'); n_abs.operation = 'ABSOLUTE'
+		n_abs.location = (-680, y)
+		L.new(n_sub.outputs[0], n_abs.inputs[0])
+		n_lt = n.new('ShaderNodeMath'); n_lt.operation = 'LESS_THAN'
+		n_lt.location = (-510, y); n_lt.inputs[1].default_value = 0.5
+		L.new(n_abs.outputs[0], n_lt.inputs[0])
+		return n_lt
+	n_is_default = _flag(0, 600)
+	n_is_glass   = _flag(4, 450)
+	n_is_metal   = _flag(6, 300)
 
-	n_sep_normal = tree.nodes.new('ShaderNodeSeparateXYZ')
-	n_sep_normal.location = (-600, 200)
-	tree.links.new(n_geom.outputs['True Normal'], n_sep_normal.inputs['Vector'])
+	# --- Geometry: True Normal + object position (for window tangent grid) ---
+	n_geom = n.new('ShaderNodeNewGeometry'); n_geom.location = (-1100, -300)
+	n_sep_norm = n.new('ShaderNodeSeparateXYZ'); n_sep_norm.location = (-900, -300)
+	L.new(n_geom.outputs['True Normal'], n_sep_norm.inputs['Vector'])
 
-	# Texture Coordinate → Object position
-	n_texcoord = tree.nodes.new('ShaderNodeTexCoord')
-	n_texcoord.location = (-800, -100)
+	n_texco = n.new('ShaderNodeTexCoord'); n_texco.location = (-1100, -550)
+	n_sep_pos = n.new('ShaderNodeSeparateXYZ'); n_sep_pos.location = (-900, -550)
+	L.new(n_texco.outputs['Object'], n_sep_pos.inputs['Vector'])
 
-	n_sep_pos = tree.nodes.new('ShaderNodeSeparateXYZ')
-	n_sep_pos.location = (-600, -100)
-	tree.links.new(n_texcoord.outputs['Object'], n_sep_pos.inputs['Vector'])
+	# Tangent projection h = Y*nx - X*ny (so windows stay aligned regardless of wall orientation)
+	n_y_nx = n.new('ShaderNodeMath'); n_y_nx.operation = 'MULTIPLY'; n_y_nx.location = (-700, -350)
+	L.new(n_sep_pos.outputs['Y'], n_y_nx.inputs[0])
+	L.new(n_sep_norm.outputs['X'], n_y_nx.inputs[1])
+	n_x_ny = n.new('ShaderNodeMath'); n_x_ny.operation = 'MULTIPLY'; n_x_ny.location = (-700, -500)
+	L.new(n_sep_pos.outputs['X'], n_x_ny.inputs[0])
+	L.new(n_sep_norm.outputs['Y'], n_x_ny.inputs[1])
+	n_h = n.new('ShaderNodeMath'); n_h.operation = 'SUBTRACT'; n_h.location = (-500, -400)
+	L.new(n_y_nx.outputs[0], n_h.inputs[0])
+	L.new(n_x_ny.outputs[0], n_h.inputs[1])
 
-	# --- Tangent projection: h = Y*nx - X*ny ---
-	n_y_nx = tree.nodes.new('ShaderNodeMath')
-	n_y_nx.operation = 'MULTIPLY'
-	n_y_nx.location = (-400, 100)
-	tree.links.new(n_sep_pos.outputs['Y'], n_y_nx.inputs[0])
-	tree.links.new(n_sep_normal.outputs['X'], n_y_nx.inputs[1])
-
-	n_x_ny = tree.nodes.new('ShaderNodeMath')
-	n_x_ny.operation = 'MULTIPLY'
-	n_x_ny.location = (-400, -50)
-	tree.links.new(n_sep_pos.outputs['X'], n_x_ny.inputs[0])
-	tree.links.new(n_sep_normal.outputs['Y'], n_x_ny.inputs[1])
-
-	n_h = tree.nodes.new('ShaderNodeMath')
-	n_h.operation = 'SUBTRACT'
-	n_h.location = (-200, 50)
-	tree.links.new(n_y_nx.outputs[0], n_h.inputs[0])
-	tree.links.new(n_x_ny.outputs[0], n_h.inputs[1])
-
-	# --- Horizontal window grid: h_frac = FLOORED_MODULO(h, 2.5) / 2.5 ---
-	n_h_mod = tree.nodes.new('ShaderNodeMath')
-	n_h_mod.operation = 'FLOORED_MODULO'
-	n_h_mod.location = (-50, 100)
+	# Horizontal window grid (2.5m pitch)
+	n_h_mod = n.new('ShaderNodeMath'); n_h_mod.operation = 'FLOORED_MODULO'; n_h_mod.location = (-300, -350)
 	n_h_mod.inputs[1].default_value = 2.5
-	tree.links.new(n_h.outputs[0], n_h_mod.inputs[0])
-
-	n_h_frac = tree.nodes.new('ShaderNodeMath')
-	n_h_frac.operation = 'DIVIDE'
-	n_h_frac.location = (100, 100)
+	L.new(n_h.outputs[0], n_h_mod.inputs[0])
+	n_h_frac = n.new('ShaderNodeMath'); n_h_frac.operation = 'DIVIDE'; n_h_frac.location = (-100, -350)
 	n_h_frac.inputs[1].default_value = 2.5
-	tree.links.new(n_h_mod.outputs[0], n_h_frac.inputs[0])
+	L.new(n_h_mod.outputs[0], n_h_frac.inputs[0])
 
-	# --- Vertical window grid: z_frac = FLOORED_MODULO(Z, 3.0) / 3.0 ---
-	n_z_mod = tree.nodes.new('ShaderNodeMath')
-	n_z_mod.operation = 'FLOORED_MODULO'
-	n_z_mod.location = (-50, -100)
+	# Vertical window grid (3m pitch — typical floor height)
+	n_z_mod = n.new('ShaderNodeMath'); n_z_mod.operation = 'FLOORED_MODULO'; n_z_mod.location = (-300, -550)
 	n_z_mod.inputs[1].default_value = 3.0
-	tree.links.new(n_sep_pos.outputs['Z'], n_z_mod.inputs[0])
-
-	n_z_frac = tree.nodes.new('ShaderNodeMath')
-	n_z_frac.operation = 'DIVIDE'
-	n_z_frac.location = (100, -100)
+	L.new(n_sep_pos.outputs['Z'], n_z_mod.inputs[0])
+	n_z_frac = n.new('ShaderNodeMath'); n_z_frac.operation = 'DIVIDE'; n_z_frac.location = (-100, -550)
 	n_z_frac.inputs[1].default_value = 3.0
-	tree.links.new(n_z_mod.outputs[0], n_z_frac.inputs[0])
+	L.new(n_z_mod.outputs[0], n_z_frac.inputs[0])
 
-	# --- Window mask: horizontal (0.15 .. 0.85) × vertical (0.1 .. 0.9) ---
-	n_h_gt = tree.nodes.new('ShaderNodeMath')
-	n_h_gt.operation = 'GREATER_THAN'
-	n_h_gt.location = (250, 150)
+	# Window mask: inside (0.15 .. 0.85) × (0.1 .. 0.9)
+	n_h_gt = n.new('ShaderNodeMath'); n_h_gt.operation = 'GREATER_THAN'; n_h_gt.location = (100, -300)
 	n_h_gt.inputs[1].default_value = 0.15
-	tree.links.new(n_h_frac.outputs[0], n_h_gt.inputs[0])
-
-	n_h_lt = tree.nodes.new('ShaderNodeMath')
-	n_h_lt.operation = 'LESS_THAN'
-	n_h_lt.location = (250, 50)
+	L.new(n_h_frac.outputs[0], n_h_gt.inputs[0])
+	n_h_lt = n.new('ShaderNodeMath'); n_h_lt.operation = 'LESS_THAN'; n_h_lt.location = (100, -400)
 	n_h_lt.inputs[1].default_value = 0.85
-	tree.links.new(n_h_frac.outputs[0], n_h_lt.inputs[0])
+	L.new(n_h_frac.outputs[0], n_h_lt.inputs[0])
+	n_h_mask = n.new('ShaderNodeMath'); n_h_mask.operation = 'MULTIPLY'; n_h_mask.location = (300, -350)
+	L.new(n_h_gt.outputs[0], n_h_mask.inputs[0])
+	L.new(n_h_lt.outputs[0], n_h_mask.inputs[1])
 
-	n_h_mask = tree.nodes.new('ShaderNodeMath')
-	n_h_mask.operation = 'MULTIPLY'
-	n_h_mask.location = (400, 100)
-	tree.links.new(n_h_gt.outputs[0], n_h_mask.inputs[0])
-	tree.links.new(n_h_lt.outputs[0], n_h_mask.inputs[1])
-
-	n_z_gt = tree.nodes.new('ShaderNodeMath')
-	n_z_gt.operation = 'GREATER_THAN'
-	n_z_gt.location = (250, -50)
+	n_z_gt = n.new('ShaderNodeMath'); n_z_gt.operation = 'GREATER_THAN'; n_z_gt.location = (100, -500)
 	n_z_gt.inputs[1].default_value = 0.1
-	tree.links.new(n_z_frac.outputs[0], n_z_gt.inputs[0])
-
-	n_z_lt = tree.nodes.new('ShaderNodeMath')
-	n_z_lt.operation = 'LESS_THAN'
-	n_z_lt.location = (250, -150)
+	L.new(n_z_frac.outputs[0], n_z_gt.inputs[0])
+	n_z_lt = n.new('ShaderNodeMath'); n_z_lt.operation = 'LESS_THAN'; n_z_lt.location = (100, -600)
 	n_z_lt.inputs[1].default_value = 0.9
-	tree.links.new(n_z_frac.outputs[0], n_z_lt.inputs[0])
+	L.new(n_z_frac.outputs[0], n_z_lt.inputs[0])
+	n_z_mask = n.new('ShaderNodeMath'); n_z_mask.operation = 'MULTIPLY'; n_z_mask.location = (300, -550)
+	L.new(n_z_gt.outputs[0], n_z_mask.inputs[0])
+	L.new(n_z_lt.outputs[0], n_z_mask.inputs[1])
 
-	n_z_mask = tree.nodes.new('ShaderNodeMath')
-	n_z_mask.operation = 'MULTIPLY'
-	n_z_mask.location = (400, -100)
-	tree.links.new(n_z_gt.outputs[0], n_z_mask.inputs[0])
-	tree.links.new(n_z_lt.outputs[0], n_z_mask.inputs[1])
+	n_window_raw = n.new('ShaderNodeMath'); n_window_raw.operation = 'MULTIPLY'; n_window_raw.location = (500, -450)
+	L.new(n_h_mask.outputs[0], n_window_raw.inputs[0])
+	L.new(n_z_mask.outputs[0], n_window_raw.inputs[1])
 
-	n_window = tree.nodes.new('ShaderNodeMath')
-	n_window.operation = 'MULTIPLY'
-	n_window.location = (550, 0)
-	tree.links.new(n_h_mask.outputs[0], n_window.inputs[0])
-	tree.links.new(n_z_mask.outputs[0], n_window.inputs[1])
+	# Window grid only applies to default residential — gate by is_default
+	n_window = n.new('ShaderNodeMath'); n_window.operation = 'MULTIPLY'; n_window.location = (700, -400)
+	L.new(n_window_raw.outputs[0], n_window.inputs[0])
+	L.new(n_is_default.outputs[0], n_window.inputs[1])
 
-	# --- Output: wall/window color mix ---
-	n_mix_color = tree.nodes.new('ShaderNodeMix')
-	n_mix_color.data_type = 'RGBA'
-	n_mix_color.location = (700, 100)
-	n_mix_color.inputs['A'].default_value = (0.75, 0.70, 0.62, 1.0)  # Wall color
-	n_mix_color.inputs['B'].default_value = (0.05, 0.07, 0.12, 1.0)  # Window color
-	tree.links.new(n_window.outputs[0], n_mix_color.inputs['Factor'])
-	tree.links.new(n_mix_color.outputs['Result'], n_bsdf.inputs['Base Color'])
+	# --- Tag colour: combine r/g/b → RGB ---
+	n_tag_color = n.new('ShaderNodeCombineColor'); n_tag_color.location = (-700, 200)
+	L.new(n_attr_r.outputs['Fac'], n_tag_color.inputs['Red'])
+	L.new(n_attr_g.outputs['Fac'], n_tag_color.inputs['Green'])
+	L.new(n_attr_b.outputs['Fac'], n_tag_color.inputs['Blue'])
 
-	# Roughness: wall=0.8, window=0.1
-	n_mix_rough = tree.nodes.new('ShaderNodeMix')
-	n_mix_rough.data_type = 'FLOAT'
-	n_mix_rough.location = (700, -100)
-	n_mix_rough.inputs['A'].default_value = 0.8
-	n_mix_rough.inputs['B'].default_value = 0.1
-	tree.links.new(n_window.outputs[0], n_mix_rough.inputs['Factor'])
-	tree.links.new(n_mix_rough.outputs['Result'], n_bsdf.inputs['Roughness'])
+	# colour_set = (r + g + b) > 0.01
+	n_rg_sum = n.new('ShaderNodeMath'); n_rg_sum.operation = 'ADD'; n_rg_sum.location = (-700,  50)
+	L.new(n_attr_r.outputs['Fac'], n_rg_sum.inputs[0])
+	L.new(n_attr_g.outputs['Fac'], n_rg_sum.inputs[1])
+	n_rgb_sum = n.new('ShaderNodeMath'); n_rgb_sum.operation = 'ADD'; n_rgb_sum.location = (-500,  50)
+	L.new(n_rg_sum.outputs[0], n_rgb_sum.inputs[0])
+	L.new(n_attr_b.outputs['Fac'], n_rgb_sum.inputs[1])
+	n_colour_set = n.new('ShaderNodeMath'); n_colour_set.operation = 'GREATER_THAN'; n_colour_set.location = (-300,  50)
+	n_colour_set.inputs[1].default_value = 0.01
+	L.new(n_rgb_sum.outputs[0], n_colour_set.inputs[0])
+
+	# --- Default fallback colour (when colour tag is unset): stone-tan, switched to dark blue for glass ---
+	n_fallback = n.new('ShaderNodeMix'); n_fallback.data_type = 'RGBA'; n_fallback.location = (-100, 200)
+	n_fallback.inputs['A'].default_value = (0.76, 0.70, 0.50, 1.0)  # stone tan (default for residential/stone/brick/wood/concrete)
+	n_fallback.inputs['B'].default_value = (0.20, 0.30, 0.40, 1.0)  # dark glass blue
+	L.new(n_is_glass.outputs[0], n_fallback.inputs['Factor'])
+
+	# Wall base colour = colour_set ? tag_colour : fallback
+	n_base = n.new('ShaderNodeMix'); n_base.data_type = 'RGBA'; n_base.location = (200, 200)
+	L.new(n_colour_set.outputs[0], n_base.inputs['Factor'])
+	L.new(n_fallback.outputs[2], n_base.inputs['A'])  # A = fallback (when factor=0)
+	L.new(n_tag_color.outputs[0], n_base.inputs['B'])  # B = tag color (when factor=1)
+
+	# --- Per-building tint variance: tint = 0.92 + building_id × 0.16 (range 0.92..1.08) ---
+	n_id_scaled = n.new('ShaderNodeMath'); n_id_scaled.operation = 'MULTIPLY'; n_id_scaled.location = (200,  50)
+	n_id_scaled.inputs[1].default_value = 0.16
+	L.new(n_attr_id.outputs['Fac'], n_id_scaled.inputs[0])
+	n_tint = n.new('ShaderNodeMath'); n_tint.operation = 'ADD'; n_tint.location = (400,  50)
+	n_tint.inputs[1].default_value = 0.92
+	L.new(n_id_scaled.outputs[0], n_tint.inputs[0])
+
+	# Apply tint as scalar multiplier on RGB
+	n_tinted = n.new('ShaderNodeMix'); n_tinted.data_type = 'RGBA'; n_tinted.blend_type = 'MULTIPLY'
+	n_tinted.location = (550, 200)
+	n_tinted.inputs['Factor'].default_value = 1.0
+	L.new(n_base.outputs[2], n_tinted.inputs['A'])
+	# Build a uniform color (tint, tint, tint) via Combine
+	n_tint_rgb = n.new('ShaderNodeCombineColor'); n_tint_rgb.location = (550,  50)
+	L.new(n_tint.outputs[0], n_tint_rgb.inputs['Red'])
+	L.new(n_tint.outputs[0], n_tint_rgb.inputs['Green'])
+	L.new(n_tint.outputs[0], n_tint_rgb.inputs['Blue'])
+	L.new(n_tint_rgb.outputs[0], n_tinted.inputs['B'])
+
+	# --- Final colour: mix between tinted wall and dark window-glass colour by window mask ---
+	n_final_color = n.new('ShaderNodeMix'); n_final_color.data_type = 'RGBA'; n_final_color.location = (900, 200)
+	n_final_color.inputs['B'].default_value = (0.05, 0.07, 0.12, 1.0)  # window/glass-dark color
+	L.new(n_window.outputs[0], n_final_color.inputs['Factor'])
+	L.new(n_tinted.outputs[2], n_final_color.inputs['A'])
+	L.new(n_final_color.outputs[2], n_bsdf.inputs['Base Color'])
+
+	# --- Roughness ---
+	# Default (residential): mix(0.8, 0.1, window) — wall rough, window glass-smooth
+	# Glass: 0.05 everywhere; Metal: 0.2; otherwise (stone/brick/concrete/wood): 0.7
+	n_rough_def = n.new('ShaderNodeMix'); n_rough_def.data_type = 'FLOAT'; n_rough_def.location = (900, -100)
+	n_rough_def.inputs['A'].default_value = 0.8
+	n_rough_def.inputs['B'].default_value = 0.1
+	L.new(n_window.outputs[0], n_rough_def.inputs['Factor'])
+
+	# rough_after_default = is_default ? rough_def : 0.7 (smooth materials)
+	n_rough1 = n.new('ShaderNodeMix'); n_rough1.data_type = 'FLOAT'; n_rough1.location = (1100, -100)
+	n_rough1.inputs['A'].default_value = 0.7
+	L.new(n_is_default.outputs[0], n_rough1.inputs['Factor'])
+	L.new(n_rough_def.outputs[0], n_rough1.inputs['B'])  # use default rough when is_default=1
+
+	# rough_after_glass = is_glass ? 0.05 : rough1
+	n_rough2 = n.new('ShaderNodeMix'); n_rough2.data_type = 'FLOAT'; n_rough2.location = (1300, -100)
+	n_rough2.inputs['B'].default_value = 0.05
+	L.new(n_is_glass.outputs[0], n_rough2.inputs['Factor'])
+	L.new(n_rough1.outputs[0], n_rough2.inputs['A'])
+
+	# rough_after_metal = is_metal ? 0.2 : rough2
+	n_rough3 = n.new('ShaderNodeMix'); n_rough3.data_type = 'FLOAT'; n_rough3.location = (1450, -100)
+	n_rough3.inputs['B'].default_value = 0.2
+	L.new(n_is_metal.outputs[0], n_rough3.inputs['Factor'])
+	L.new(n_rough2.outputs[0], n_rough3.inputs['A'])
+	L.new(n_rough3.outputs[0], n_bsdf.inputs['Roughness'])
+
+	# Metallic = is_metal × 0.9
+	n_metallic = n.new('ShaderNodeMath'); n_metallic.operation = 'MULTIPLY'; n_metallic.location = (1300, -250)
+	n_metallic.inputs[1].default_value = 0.9
+	L.new(n_is_metal.outputs[0], n_metallic.inputs[0])
+	L.new(n_metallic.outputs[0], n_bsdf.inputs['Metallic'])
 
 	return mat
 
@@ -927,6 +1067,14 @@ class OSM_IMPORT():
 					roof_shape_layer = bm.faces.layers.int.new('roof_shape')
 					roof_height_layer = bm.faces.layers.float.new('roof_height')
 					roof_direction_layer = bm.faces.layers.float.new('roof_direction')
+					building_material_layer = bm.faces.layers.int.new('building_material')
+					building_colour_r_layer = bm.faces.layers.float.new('building_colour_r')
+					building_colour_g_layer = bm.faces.layers.float.new('building_colour_g')
+					building_colour_b_layer = bm.faces.layers.float.new('building_colour_b')
+					roof_material_layer = bm.faces.layers.int.new('roof_material')
+					roof_colour_r_layer = bm.faces.layers.float.new('roof_colour_r')
+					roof_colour_g_layer = bm.faces.layers.float.new('roof_colour_g')
+					roof_colour_b_layer = bm.faces.layers.float.new('roof_colour_b')
 				if is_street:
 					width_layer = bm.verts.layers.float.new('width')
 
@@ -1009,6 +1157,25 @@ class OSM_IMPORT():
 						elif tags.get('roof:orientation') == 'across':
 							_rd = 90.0
 						face[roof_direction_layer] = float(_rd)
+
+						# Building material + colour (S3DB-aware shader switch)
+						face[building_material_layer] = BUILDING_MATERIAL_MAP.get(tags.get('building:material', '').lower(), 0)
+						_bcol = _parseColour(tags.get('building:colour'))
+						# A non-positive colour means "unset" — shader falls back to material default
+						if _bcol is None:
+							_bcol = (0.0, 0.0, 0.0)
+						face[building_colour_r_layer] = _bcol[0]
+						face[building_colour_g_layer] = _bcol[1]
+						face[building_colour_b_layer] = _bcol[2]
+
+						# Roof material + colour (parsed now, hooked up to shader in Phase 2b)
+						face[roof_material_layer] = ROOF_MATERIAL_MAP.get(tags.get('roof:material', '').lower(), 0)
+						_rcol = _parseColour(tags.get('roof:colour'))
+						if _rcol is None:
+							_rcol = (0.0, 0.0, 0.0)
+						face[roof_colour_r_layer] = _rcol[0]
+						face[roof_colour_g_layer] = _rcol[1]
+						face[roof_colour_b_layer] = _rcol[2]
 
 
 				elif len(pts) > 1: #edge
