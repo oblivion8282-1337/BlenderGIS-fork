@@ -193,3 +193,130 @@ def get_compound_routing(compound_key):
 		e = flat[compound_key]
 		return e['srckey'], e['laykey']
 	return compound_key, 'CUSTOM'
+
+
+# ---------------------------------------------------------------------------
+# xyzservices catalog import
+# ---------------------------------------------------------------------------
+
+XYZSERVICES_URL = (
+	'https://raw.githubusercontent.com/geopandas/xyzservices/main/'
+	'provider_sources/leaflet-providers-parsed.json'
+)
+
+
+def _walk_xyzservices(node, path=()):
+	"""Yield (compound_key, leaf_dict) tuples from an xyzservices catalog
+	(dict-of-dicts with leaf entries identified by a 'url' field)."""
+	if isinstance(node, dict):
+		if 'url' in node:
+			key = node.get('name') or '.'.join(path)
+			yield key, node
+			return
+		for k, v in node.items():
+			yield from _walk_xyzservices(v, path + (k,))
+
+
+def _adapt_xyz_entry(entry):
+	"""Convert one xyzservices leaf into our provider-override schema, or
+	return None if the entry can't be represented as a plain TMS URL."""
+	import re
+	url = entry.get('url', '')
+	if not url:
+		return None
+	apikey_field = entry.get('apikey')
+	# xyzservices marks unfilled keys with a literal placeholder string. We
+	# can't satisfy those at import time so skip them.
+	if apikey_field == '<insert your api key here>' or apikey_field == '':
+		return None
+	# Adapt placeholders to our format.
+	mapped = (url
+		.replace('{z}', '{Z}')
+		.replace('{x}', '{X}')
+		.replace('{y}', '{Y}'))
+	# Retina markers we don't support → drop.
+	mapped = mapped.replace('{r}', '')
+	# File extension: substitute literal value
+	if '{ext}' in mapped:
+		ext = entry.get('ext') or 'png'
+		mapped = mapped.replace('{ext}', ext)
+	# Subdomain: take first from list, fall back to 'a'.
+	if '{s}' in mapped:
+		subs = entry.get('subdomains') or 'abc'
+		first = subs[0] if subs else 'a'
+		mapped = mapped.replace('{s}', first)
+	# Real apikey value baked in (some entries inline a free token, e.g.
+	# OpenSnowMap doesn't but Thunderforest gives an empty 'apikey' key —
+	# we already skipped those).
+	if apikey_field and isinstance(apikey_field, str):
+		mapped = mapped.replace('{apikey}', apikey_field)
+	# Any remaining unresolved braces means we'd produce a broken URL → skip.
+	leftovers = re.findall(r'\{([^}]+)\}', mapped)
+	leftovers = [m for m in leftovers if m not in ('Z', 'X', 'Y')]
+	if leftovers:
+		return None
+	# Heuristic format: extension in URL wins, else infer from ext field.
+	ext_lower = (entry.get('ext') or '').lower()
+	if mapped.lower().endswith(('.jpg', '.jpeg')) or ext_lower in ('jpg', 'jpeg'):
+		fmt = 'jpg'
+	else:
+		fmt = 'png'
+	return {
+		'url': mapped,
+		'format': fmt,
+		'zmin': int(entry.get('min_zoom', 0)),
+		'zmax': int(entry.get('max_zoom', 19)),
+		'description': entry.get('attribution', '') or '',
+	}
+
+
+def import_xyz_catalog(prefs, fetch_fn=None):
+	"""Fetch the xyzservices catalog and merge it into the user overrides as
+	is_imported entries. Re-importing replaces previous imports while keeping
+	visibility flags so the user's curation survives a refresh.
+
+	Returns (added, skipped, refreshed).
+	"""
+	import urllib.request, json
+	if fetch_fn is None:
+		def fetch_fn(url):
+			req = urllib.request.Request(url, headers={'User-Agent': 'CartoBlend xyz-import'})
+			with urllib.request.urlopen(req, timeout=20) as resp:
+				return resp.read().decode('utf-8')
+	body = fetch_fn(XYZSERVICES_URL)
+	xyz = json.loads(body)
+
+	overrides = get_user_overrides(prefs)
+	# Capture visibility of previously imported entries so the user's hide/show
+	# choices don't get clobbered on refresh.
+	prev_visible = {k: v.get('visible', False)
+		for k, v in overrides.items() if v.get('is_imported')}
+	# Drop previous imports.
+	for k in list(overrides.keys()):
+		if overrides[k].get('is_imported'):
+			del overrides[k]
+
+	builtin_keys = set(_flatten_builtins().keys())
+	added = 0
+	skipped = 0
+	for compound, leaf in _walk_xyzservices(xyz):
+		# Imports never override a built-in — user can't edit those via import.
+		if compound in builtin_keys:
+			continue
+		adapted = _adapt_xyz_entry(leaf)
+		if adapted is None:
+			skipped += 1
+			continue
+		entry = {
+			'is_custom': True,
+			'is_imported': True,
+			'visible': prev_visible.get(compound, False),  # default hidden
+			'name': compound,
+			'grid': 'WM',
+		}
+		entry.update(adapted)
+		overrides[compound] = entry
+		added += 1
+
+	set_user_overrides(prefs, overrides)
+	return (added, skipped, len(prev_visible))

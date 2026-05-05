@@ -597,6 +597,9 @@ class BGIS_PREFS(AddonPreferences):
 		col.operator('bgis.remove_provider', icon='REMOVE', text='')
 		col.separator()
 		col.operator('bgis.reset_providers', icon='LOOP_BACK', text='')
+		row = box.row()
+		row.operator('bgis.import_xyz_catalog',
+			text='Import 200+ providers from xyzservices', icon='IMPORT')
 
 		# ── Tile Cache ────────────────────────────────────────────────────────
 		box = layout.box()
@@ -1272,6 +1275,44 @@ class BGIS_OT_cache_clear_expired(Operator):
 # Map Tile Providers — UIList + Add/Edit/Remove/Reset operators
 # ---------------------------------------------------------------------------
 
+def _probe_tile_url(url, fmt, zmin):
+	"""Synchronous one-shot tile fetch used by the dialog Test button.
+	Returns a short status string ready to render on a label.
+
+	Substitutes a small valid tile (z=max(2, zmin), x=1, y=1) into the
+	template, GETs it with a 6 s timeout and inspects the magic bytes.
+	"""
+	import urllib.request, urllib.error, ssl
+	if not url.strip():
+		return ('ERROR', 'URL is empty')
+	z = max(2, int(zmin))
+	test = (url
+		.replace('{z}', str(z)).replace('{Z}', str(z))
+		.replace('{x}', '1').replace('{X}', '1')
+		.replace('{y}', '1').replace('{Y}', '1')
+		.replace('{ext}', fmt or 'png')
+		.replace('{r}', ''))
+	# Fail fast if any unsubstituted placeholders remain
+	import re
+	leftovers = re.findall(r'\{[^}]+\}', test)
+	if leftovers:
+		return ('ERROR', 'Unresolved placeholders: {}'.format(', '.join(leftovers)))
+	try:
+		req = urllib.request.Request(test, headers={'User-Agent': 'CartoBlend tile probe'})
+		with urllib.request.urlopen(req, timeout=6) as resp:
+			data = resp.read()
+		if data.startswith(b'\x89PNG'):
+			kind = 'PNG'
+		elif data[:2] == b'\xff\xd8':
+			kind = 'JPG'
+		else:
+			return ('ERROR', 'Unexpected payload ({} bytes, magic {!r})'.format(len(data), data[:4]))
+		return ('OK', 'OK — {} {} ({} bytes)'.format(resp.status, kind, len(data)))
+	except urllib.error.HTTPError as e:
+		return ('ERROR', 'HTTP {} {}'.format(e.code, e.reason))
+	except Exception as e:
+		return ('ERROR', '{}: {}'.format(type(e).__name__, e))
+
 class GIS_UL_providers(UIList):
 	def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
 		row = layout.row(align=True)
@@ -1300,6 +1341,20 @@ def _grid_items(self, context):
 	return [(k, v.get('name', k), v.get('description', '')) for k, v in GRIDS.items()]
 
 
+def _test_url_callback(self, context):
+	"""Update callback bound to the dialog's `test_button` toggle. The
+	BoolProperty pattern lets us run a network probe without dismissing the
+	parent invoke_props_dialog (which an operator-button click would do)."""
+	if not self.test_button:
+		return
+	# Reset toggle so the user can click again. Setting via subscript bypasses
+	# the update callback so we don't recurse.
+	self['test_button'] = False
+	status, msg = _probe_tile_url(self.url, self.format, self.zmin)
+	self.test_status = status
+	self.test_result = msg
+
+
 class BGIS_OT_add_provider(Operator):
 	bl_idname = "bgis.add_provider"
 	bl_description = 'Add a custom map tile provider'
@@ -1317,7 +1372,18 @@ class BGIS_OT_add_provider(Operator):
 	grid: EnumProperty(name='Grid', items=_grid_items)
 	description: StringProperty(name='Description', default='')
 
+	# Inline tile-probe state. test_button is rendered as a toggle; flipping
+	# it fires _test_url_callback which writes status+message back here.
+	test_button: BoolProperty(name='Test Connection',
+		description='Probe the URL by fetching tile z=2/x=1/y=1',
+		default=False, update=_test_url_callback)
+	test_status: StringProperty(default='', options={'HIDDEN'})
+	test_result: StringProperty(default='', options={'HIDDEN'})
+
 	def invoke(self, context, event):
+		# Reset transient probe state so a previous result doesn't bleed through
+		self.test_status = ''
+		self.test_result = ''
 		return context.window_manager.invoke_props_dialog(self, width=420)
 
 	def draw(self, context):
@@ -1331,6 +1397,12 @@ class BGIS_OT_add_provider(Operator):
 		row.prop(self, 'zmin')
 		row.prop(self, 'zmax')
 		layout.prop(self, 'description')
+		# Test connection row + result label
+		row = layout.row()
+		row.prop(self, 'test_button', text='Test Connection', toggle=True, icon='URL')
+		if self.test_result:
+			icon = 'CHECKMARK' if self.test_status == 'OK' else 'CANCEL'
+			layout.label(text=self.test_result, icon=icon)
 
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
@@ -1379,6 +1451,13 @@ class BGIS_OT_edit_provider(Operator):
 	grid: EnumProperty(name='Grid', items=_grid_items)
 	description: StringProperty(name='Description', default='')
 
+	# Same Test Connection pattern as BGIS_OT_add_provider
+	test_button: BoolProperty(name='Test Connection',
+		description='Probe the URL by fetching tile z=2/x=1/y=1',
+		default=False, update=_test_url_callback)
+	test_status: StringProperty(default='', options={'HIDDEN'})
+	test_result: StringProperty(default='', options={'HIDDEN'})
+
 	def _selected_row(self, prefs):
 		col = prefs.providers_collection
 		idx = prefs.providers_index
@@ -1401,6 +1480,8 @@ class BGIS_OT_edit_provider(Operator):
 		self.zmax = int(entry.get('zmax', 19))
 		self.grid = entry.get('grid', 'WM')
 		self.description = entry.get('description', '')
+		self.test_status = ''
+		self.test_result = ''
 		return context.window_manager.invoke_props_dialog(self, width=420)
 
 	def draw(self, context):
@@ -1418,6 +1499,11 @@ class BGIS_OT_edit_provider(Operator):
 		row_l.prop(self, 'zmin')
 		row_l.prop(self, 'zmax')
 		layout.prop(self, 'description')
+		row_l = layout.row()
+		row_l.prop(self, 'test_button', text='Test Connection', toggle=True, icon='URL')
+		if self.test_result:
+			icon = 'CHECKMARK' if self.test_status == 'OK' else 'CANCEL'
+			layout.label(text=self.test_result, icon=icon)
 
 	def execute(self, context):
 		prefs = context.preferences.addons[PKG].preferences
@@ -1485,6 +1571,29 @@ class BGIS_OT_remove_provider(Operator):
 		return {'FINISHED'}
 
 
+class BGIS_OT_import_xyz_catalog(Operator):
+	bl_idname = "bgis.import_xyz_catalog"
+	bl_description = ('Fetch the leaflet-providers / xyzservices catalog '
+		'and add 200+ community tile providers (hidden by default; tick to enable)')
+	bl_label = "Import xyzservices Catalog"
+	bl_options = {'INTERNAL'}
+
+	def execute(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		try:
+			added, skipped, refreshed = providers_mod.import_xyz_catalog(prefs)
+		except Exception as e:
+			log.error('xyzservices import failed', exc_info=True)
+			self.report({'ERROR'}, "Import failed: {}".format(e))
+			return {'CANCELLED'}
+		rebuild_providers_collection(prefs)
+		msg = "Imported {} providers ({} skipped — needed key/extras)".format(added, skipped)
+		if refreshed:
+			msg += "; preserved visibility on {} previously imported entries".format(refreshed)
+		self.report({'INFO'}, msg)
+		return {'FINISHED'}
+
+
 class BGIS_OT_reset_providers(Operator):
 	bl_idname = "bgis.reset_providers"
 	bl_description = 'Discard custom providers and restore default visibility'
@@ -1526,6 +1635,7 @@ BGIS_OT_add_provider,
 BGIS_OT_edit_provider,
 BGIS_OT_remove_provider,
 BGIS_OT_reset_providers,
+BGIS_OT_import_xyz_catalog,
 ]
 
 def register():
