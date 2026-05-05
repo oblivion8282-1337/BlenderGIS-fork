@@ -1306,7 +1306,6 @@ class GIS_UL_providers(UIList):
 			return
 		configured = all(getattr(prefs, a, '') for a in attrs)
 		key_row = row.row(align=True)
-		key_row.alert = not configured  # red-tint empty fields to draw the eye
 		for attr in attrs:
 			key_row.prop(prefs, attr, text='')
 		if not configured:
