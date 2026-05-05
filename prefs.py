@@ -1171,12 +1171,18 @@ def register():
 			bpy.utils.unregister_class(cls)
 			bpy.utils.register_class(cls)
 
-	# set default cache folder
-	prefs = bpy.context.preferences.addons[PKG].preferences
+	# Set default cache folder and restore persisted credentials.
+	# The addon entry may not yet exist in preferences.addons when register() is
+	# invoked via low-level paths (e.g. addon_utils.enable() right after a
+	# read_factory_settings, or during certain reload sequences). Skip silently
+	# in that case — the UI will populate the entry on first access.
+	try:
+		prefs = bpy.context.preferences.addons[PKG].preferences
+	except KeyError:
+		log.debug('Addon entry %s not yet in preferences.addons; deferring prefs init', PKG)
+		return
 	if prefs.cacheFolder == '':
 		prefs.cacheFolder = APP_DATA
-
-	# Restore API keys / credentials from persistent file
 	restore_credentials(prefs)
 
 
