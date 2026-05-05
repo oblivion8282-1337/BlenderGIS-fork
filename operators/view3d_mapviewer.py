@@ -671,9 +671,30 @@ def _estimate_export_tiles(basemap, export_zoom):
 
 ###############
 
+# Sources whose tile URLs require an addon-prefs API key. We hide them from the
+# N-Panel picker until the matching key field is populated, so users don't pick
+# a provider only to see empty/error tiles.
+_KEYED_SOURCES = {
+	'MAPBOX': ('mapbox_token',),
+	'MAPTILER': ('maptiler_api_key',),
+	'THUNDERFOREST': ('thunderforest_api_key',),
+	'STADIA': ('stadia_api_key',),
+	'CDSE_S2': ('cdse_client_id', 'cdse_client_secret'),
+}
+
+
 def _list_sources(self, context):
+	prefs = None
+	try:
+		prefs = context.preferences.addons[PKG].preferences
+	except (KeyError, AttributeError):
+		pass
 	items = []
 	for srckey, src in SOURCES.items():
+		required = _KEYED_SOURCES.get(srckey)
+		if required and prefs is not None:
+			if not all(getattr(prefs, attr, '') for attr in required):
+				continue
 		items.append((srckey, src['name'], src['description']))
 	return items
 
@@ -756,9 +777,19 @@ class VIEW3D_OT_map_start(Operator):
 	bl_options = {'REGISTER'}
 
 	def listSources(self, context):
+		# Same key-aware filter as the N-Panel dropdown: hide providers whose
+		# API key isn't configured.
+		prefs = None
+		try:
+			prefs = context.preferences.addons[PKG].preferences
+		except (KeyError, AttributeError):
+			pass
 		srcItems = []
 		for srckey, src in SOURCES.items():
-			#put each item in a tuple (key, label, tooltip)
+			required = _KEYED_SOURCES.get(srckey)
+			if required and prefs is not None:
+				if not all(getattr(prefs, attr, '') for attr in required):
+					continue
 			srcItems.append( (srckey, src['name'], src['description']) )
 		return srcItems
 

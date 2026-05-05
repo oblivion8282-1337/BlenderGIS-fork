@@ -41,7 +41,6 @@ _CREDENTIAL_KEYS = [
 	'maptiler_api_key',
 	'stadia_api_key',
 	'mapbox_token',
-	'maptiler_tile_key',
 	'thunderforest_api_key',
 	'cdse_client_id',
 	'cdse_client_secret',
@@ -82,6 +81,16 @@ def _sync_credential(prop_name, value):
 def restore_credentials(prefs):
 	"""Restore credentials from file into addon preferences (called on register)."""
 	data = _load_credentials()
+	# Migrate the legacy two-MapTiler-key split: maptiler_tile_key (used only
+	# for tile auth) was redundant because the same MapTiler API key works for
+	# both Maps and Coordinates. Fold any leftover value into maptiler_api_key.
+	legacy_tile_key = data.get('maptiler_tile_key')
+	if legacy_tile_key and not data.get('maptiler_api_key'):
+		data['maptiler_api_key'] = legacy_tile_key
+		log.info('Migrated legacy maptiler_tile_key -> maptiler_api_key')
+	if 'maptiler_tile_key' in data:
+		data.pop('maptiler_tile_key', None)
+		_save_credentials(data)
 	for key in _CREDENTIAL_KEYS:
 		val = data.get(key, '')
 		if val and not getattr(prefs, key, ''):
@@ -341,6 +350,7 @@ class BGIS_PREFS(AddonPreferences):
 	opentopography_api_key: StringProperty(
 		name = "",
 		description="you need to register and request a key from opentopography website",
+		subtype = 'PASSWORD',
 		update = updateOpentopoKey
 	)
 
@@ -350,7 +360,8 @@ class BGIS_PREFS(AddonPreferences):
 
 	maptiler_api_key: StringProperty(
 		name = "",
-		description = "API key for MapTiler Coordinates API (required for EPSG.io migration)",
+		description = "MapTiler API key — used for both Coordinates (CRS search) and tiles. Free tier 100k loads/month at maptiler.com.",
+		subtype = 'PASSWORD',
 		update = updateMapTilerApiKey
 	)
 
@@ -361,17 +372,8 @@ class BGIS_PREFS(AddonPreferences):
 	mapbox_token: StringProperty(
 		name = "",
 		description = "Access token for Mapbox (register free at mapbox.com)",
+		subtype = 'PASSWORD',
 		update = updateMapboxToken
-	)
-
-	def updateMaptilerTileKey(self, context):
-		settings.maptiler_tile_key = self.maptiler_tile_key
-		_sync_credential('maptiler_tile_key', self.maptiler_tile_key)
-
-	maptiler_tile_key: StringProperty(
-		name = "",
-		description = "API key for MapTiler map tiles (register free at maptiler.com)",
-		update = updateMaptilerTileKey
 	)
 
 	def updateThunderforestApiKey(self, context):
@@ -381,6 +383,7 @@ class BGIS_PREFS(AddonPreferences):
 	thunderforest_api_key: StringProperty(
 		name = "",
 		description = "API key for Thunderforest (register free at thunderforest.com)",
+		subtype = 'PASSWORD',
 		update = updateThunderforestApiKey
 	)
 
@@ -391,6 +394,7 @@ class BGIS_PREFS(AddonPreferences):
 	stadia_api_key: StringProperty(
 		name = "",
 		description = "API key for Stadia Maps (register free at stadiamaps.com)",
+		subtype = 'PASSWORD',
 		update = updateStadiaApiKey
 	)
 
@@ -400,6 +404,7 @@ class BGIS_PREFS(AddonPreferences):
 	cdse_client_id: StringProperty(
 		name = "",
 		description = "Copernicus Data Space OAuth2 Client ID (register free at dataspace.copernicus.eu)",
+		subtype = 'PASSWORD',
 		update = updateCdseClientId
 	)
 
@@ -439,55 +444,140 @@ class BGIS_PREFS(AddonPreferences):
 		description = "Select the logging level",
 		items = [('DEBUG', 'Debug', ''), ('INFO', 'Info', ''), ('WARNING', 'Warning', ''), ('ERROR', 'Error', ''), ('CRITICAL', 'Critical', '')],
 		update = updateLogLevel,
-		default = 'DEBUG'
+		default = 'INFO'
+		)
+
+	show_advanced: BoolProperty(
+		name = "Show advanced settings",
+		description = "Reveal cache behavior, custom CRS list, custom servers, engine selection, OSM tags and log level",
+		default = False
 		)
 
 	################
+	# Provider registration URLs (used by the "Get free key" buttons)
+	_REGISTER_URLS = {
+		'mapbox_token': 'https://account.mapbox.com/auth/signup/',
+		'maptiler_api_key': 'https://www.maptiler.com/cloud/account/keys/',
+		'thunderforest_api_key': 'https://www.thunderforest.com/pricing/',
+		'stadia_api_key': 'https://client.stadiamaps.com/signup/',
+		'cdse_client_id': 'https://dataspace.copernicus.eu/',
+		'opentopography_api_key': 'https://portal.opentopography.org/myopentopo',
+	}
+
+	def _draw_provider_row(self, layout, label, attr, register_url=None, secondary_attr=None):
+		"""One key row with status icon, label, password field, and a register link."""
+		row = layout.row(align=True)
+		configured = bool(getattr(self, attr, ''))
+		if secondary_attr is not None:
+			configured = configured and bool(getattr(self, secondary_attr, ''))
+		row.label(text='', icon='CHECKMARK' if configured else 'X')
+		row.label(text=label)
+		if secondary_attr is None:
+			row.prop(self, attr, text='')
+		else:
+			sub = row.row(align=True)
+			sub.prop(self, attr, text='')
+			sub.prop(self, secondary_attr, text='')
+		if register_url:
+			op = row.operator("wm.url_open", icon='URL', text='')
+			op.url = register_url
+
 	def draw(self, context):
 		layout = self.layout
 
-		#SRS
+		# ── Map Tile Providers ────────────────────────────────────────────────
+		# This is the #1 reason users open the prefs panel: enter an API key to
+		# unlock more basemaps. Keep it compact, status-driven, with a one-click
+		# register button that opens the provider's signup page.
 		box = layout.box()
-		box.label(text='Spatial Reference Systems')
-		row = box.row().split(factor=0.5)
+		header = box.row()
+		header.label(text='Map Tile Providers', icon='WORLD_DATA')
+		header.label(text='18 providers free without a key — add a key to unlock more')
+		self._draw_provider_row(box, 'Mapbox', 'mapbox_token',
+			register_url=self._REGISTER_URLS['mapbox_token'])
+		self._draw_provider_row(box, 'MapTiler', 'maptiler_api_key',
+			register_url=self._REGISTER_URLS['maptiler_api_key'])
+		self._draw_provider_row(box, 'Thunderforest', 'thunderforest_api_key',
+			register_url=self._REGISTER_URLS['thunderforest_api_key'])
+		self._draw_provider_row(box, 'Stadia Maps', 'stadia_api_key',
+			register_url=self._REGISTER_URLS['stadia_api_key'])
+		self._draw_provider_row(box, 'Copernicus CDSE', 'cdse_client_id',
+			register_url=self._REGISTER_URLS['cdse_client_id'],
+			secondary_attr='cdse_client_secret')
+		self._draw_provider_row(box, 'OpenTopography (DEM)', 'opentopography_api_key',
+			register_url=self._REGISTER_URLS['opentopography_api_key'])
+
+		# ── Tile Cache ────────────────────────────────────────────────────────
+		box = layout.box()
+		box.label(text='Tile Cache', icon='FILE_CACHE')
+		row = box.row()
+		row.prop(self, "cacheFolder", text='')
+		cache_dir = self.cacheFolder
+		if cache_dir and os.path.isdir(cache_dir):
+			gpkg_files = [f for f in os.listdir(cache_dir) if f.endswith('.gpkg')]
+			total_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in gpkg_files)
+			if total_bytes > 1024 ** 3:
+				size_str = "{:.1f} GB".format(total_bytes / (1024 ** 3))
+			elif total_bytes > 1024 ** 2:
+				size_str = "{:.0f} MB".format(total_bytes / (1024 ** 2))
+			else:
+				size_str = "{:.0f} KB".format(total_bytes / 1024)
+			box.label(text="{} across {} cached source{}".format(
+				size_str, len(gpkg_files), '' if len(gpkg_files) == 1 else 's'))
+		row = box.row(align=True)
+		row.operator("bgis.cache_clear_expired", icon='TRASH', text="Clear Expired")
+		row.operator("bgis.cache_clear_all", icon='CANCEL', text="Clear All")
+		row.prop(self, "cacheExpiry", text="Expire after (days)")
+
+		# ── Advanced (collapsed by default) ───────────────────────────────────
+		box = layout.box()
+		row = box.row()
+		row.prop(self, "show_advanced",
+			icon='TRIA_DOWN' if self.show_advanced else 'TRIA_RIGHT',
+			emboss=False, text='Advanced')
+		if not self.show_advanced:
+			return
+
+		# Spatial Reference Systems
+		sub = box.box()
+		sub.label(text='Spatial Reference Systems')
+		row = sub.row().split(factor=0.5)
 		row.prop(self, "predefCrs", text='')
 		row.operator("bgis.add_predef_crs", icon='ADD')
 		row.operator("bgis.edit_predef_crs", icon='PREFERENCES')
 		row.operator("bgis.rmv_predef_crs", icon='REMOVE')
 		row.operator("bgis.reset_predef_crs", icon='PLAY_REVERSE')
 
-		#Basemaps
-		box = layout.box()
-		box.label(text='Basemaps')
-		box.prop(self, "cacheFolder")
-		box.prop(self, "cacheExpiry")
-		# Cache size info
-		cache_dir = self.cacheFolder
-		if cache_dir and os.path.isdir(cache_dir):
-			gpkg_files = [f for f in os.listdir(cache_dir) if f.endswith('.gpkg')]
-			total_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in gpkg_files)
-			if total_bytes > 1024 * 1024 * 1024:
-				size_str = "{:.1f} GB".format(total_bytes / (1024**3))
-			elif total_bytes > 1024 * 1024:
-				size_str = "{:.0f} MB".format(total_bytes / (1024**2))
-			else:
-				size_str = "{:.0f} KB".format(total_bytes / 1024)
-			box.label(text="Cache: {} ({} sources)".format(size_str, len(gpkg_files)), icon='FILE_CACHE')
-		row = box.row(align=True)
-		row.operator("bgis.cache_clear_expired", icon='TRASH', text="Clear Expired")
-		row.operator("bgis.cache_clear_all", icon='CANCEL', text="Clear All")
-		row = box.row()
+		# Basemap behaviour
+		sub = box.box()
+		sub.label(text='Basemap behaviour')
+		row = sub.row()
 		row.prop(self, "zoomToMouse")
 		row.prop(self, "lockObj")
 		row.prop(self, "lockOrigin")
 		row.prop(self, "synchOrj")
-		row = box.row()
-		row.prop(self, "resamplAlg")
+		sub.prop(self, "resamplAlg")
 
-		#IO
-		box = layout.box()
-		box.label(text='Import/Export')
-		row = box.row().split(factor=0.5)
+		# Custom remote datasources
+		sub = box.box()
+		sub.label(text='Custom remote datasources')
+		row = sub.row().split(factor=0.5)
+		row.prop(self, "overpassServer")
+		row.operator("bgis.add_overpass_server", icon='ADD')
+		row.operator("bgis.edit_overpass_server", icon='PREFERENCES')
+		row.operator("bgis.rmv_overpass_server", icon='REMOVE')
+		row.operator("bgis.reset_overpass_server", icon='PLAY_REVERSE')
+		row = sub.row().split(factor=0.5)
+		row.prop(self, "demServer")
+		row.operator("bgis.add_dem_server", icon='ADD')
+		row.operator("bgis.edit_dem_server", icon='PREFERENCES')
+		row.operator("bgis.rmv_dem_server", icon='REMOVE')
+		row.operator("bgis.reset_dem_server", icon='PLAY_REVERSE')
+
+		# OSM tag list + Import/Export options
+		sub = box.box()
+		sub.label(text='Import / Export')
+		row = sub.row().split(factor=0.5)
 		split = row.split(factor=0.9, align=True)
 		split.prop(self, "osmTags")
 		split.operator("wm.url_open", icon='INFO').url = "http://wiki.openstreetmap.org/wiki/Map_Features"
@@ -495,68 +585,17 @@ class BGIS_PREFS(AddonPreferences):
 		row.operator("bgis.edit_osm_tag", icon='PREFERENCES')
 		row.operator("bgis.rmv_osm_tag", icon='REMOVE')
 		row.operator("bgis.reset_osm_tags", icon='PLAY_REVERSE')
-		row = box.row()
+		row = sub.row()
 		row.prop(self, "mergeDoubles")
 		row.prop(self, "adjust3Dview")
 		row.prop(self, "forceTexturedSolid")
 
-		#Network
-		box = layout.box()
-		box.label(text='Remote datasource')
-		row = box.row().split(factor=0.5)
-		row.prop(self, "overpassServer")
-		row.operator("bgis.add_overpass_server", icon='ADD')
-		row.operator("bgis.edit_overpass_server", icon='PREFERENCES')
-		row.operator("bgis.rmv_overpass_server", icon='REMOVE')
-		row.operator("bgis.reset_overpass_server", icon='PLAY_REVERSE')
-		row = box.row().split(factor=0.5)
-		row.prop(self, "demServer")
-		row.operator("bgis.add_dem_server", icon='ADD')
-		row.operator("bgis.edit_dem_server", icon='PREFERENCES')
-		row.operator("bgis.rmv_dem_server", icon='REMOVE')
-		row.operator("bgis.reset_dem_server", icon='PLAY_REVERSE')
-
-		row = box.row().split(factor=0.2)
-		row.label(text="Opentopography Api Key")
-		row.prop(self, "opentopography_api_key")
-
-		row = box.row().split(factor=0.2)
-		row.label(text="MapTiler API Key")
-		row.prop(self, "maptiler_api_key")
-
-		#Map tile provider API keys
-		box2 = box.box()
-		box2.label(text="Map Tile Providers (optional — register for free tiers)", icon='WORLD_DATA')
-		row = box2.row().split(factor=0.2)
-		row.label(text="Mapbox Token")
-		row.prop(self, "mapbox_token")
-		row = box2.row().split(factor=0.2)
-		row.label(text="MapTiler Tile Key")
-		row.prop(self, "maptiler_tile_key")
-		row = box2.row().split(factor=0.2)
-		row.label(text="Thunderforest Key")
-		row.prop(self, "thunderforest_api_key")
-		row = box2.row().split(factor=0.2)
-		row.label(text="Stadia Maps Key")
-		row.prop(self, "stadia_api_key")
-
-		#CDSE
-		box2 = box.box()
-		box2.label(text="Copernicus CDSE (Sentinel-2, commercial use OK)", icon='WORLD_DATA')
-		row = box2.row().split(factor=0.2)
-		row.label(text="Client ID")
-		row.prop(self, "cdse_client_id")
-		row = box2.row().split(factor=0.2)
-		row.label(text="Client Secret")
-		row.prop(self, "cdse_client_secret")
-		box2.label(text="Register free at dataspace.copernicus.eu → Dashboard → OAuth clients", icon='INFO')
-
-		#System
-		box = layout.box()
-		box.label(text='System')
-		box.prop(self, "projEngine")
-		box.prop(self, "imgEngine")
-		box.prop(self, "logLevel")
+		# Engines and log level
+		sub = box.box()
+		sub.label(text='System')
+		sub.prop(self, "projEngine")
+		sub.prop(self, "imgEngine")
+		sub.prop(self, "logLevel")
 
 #######################
 

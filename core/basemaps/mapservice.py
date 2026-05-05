@@ -738,7 +738,7 @@ class MapService():
 			for placeholder, attr in (
 				('{STADIA_API_KEY}', 'stadia_api_key'),
 				('{MAPBOX_TOKEN}', 'mapbox_token'),
-				('{MAPTILER_KEY}', 'maptiler_tile_key'),
+				('{MAPTILER_KEY}', 'maptiler_api_key'),
 				('{THUNDERFOREST_KEY}', 'thunderforest_api_key'),
 			):
 				if placeholder in url:

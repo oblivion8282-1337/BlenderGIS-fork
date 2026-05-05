@@ -40,7 +40,6 @@ class Settings():
 			self.maptiler_api_key = None
 		self.stadia_api_key = kwargs.get('stadia_api_key')
 		self.mapbox_token = kwargs.get('mapbox_token')
-		self.maptiler_tile_key = kwargs.get('maptiler_tile_key')
 		self.thunderforest_api_key = kwargs.get('thunderforest_api_key')
 
 	@property
