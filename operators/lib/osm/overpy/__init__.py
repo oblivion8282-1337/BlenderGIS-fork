@@ -21,7 +21,7 @@ if PY2:
     from urllib2 import urlopen
     from urllib2 import HTTPError
 elif PY3:
-    from io import StringIO
+    from io import StringIO, BytesIO
     from urllib.request import urlopen, Request
     from urllib.error import HTTPError
 
@@ -282,7 +282,7 @@ class Result(object):
         return result
 
     @classmethod
-    def from_xml(cls, data, api=None, iterparse=True):
+    def from_xml(cls, data, api=None, iterparse=None):
         """
         Create a new instance and load data from xml object.
 
@@ -290,6 +290,10 @@ class Result(object):
         :type data: xml.etree.ElementTree.Element
         :param api:
         :type api: Overpass
+        :param iterparse: ``None`` (default) auto-selects: iterparse for file
+            paths (RAM-friendly on large OSM dumps), DOM single-pass for
+            in-memory bytes/str (faster on small inputs). Pass ``True``/``False``
+            to force a mode.
         :return: New instance of Result object
         :rtype: Result
         """
@@ -299,6 +303,9 @@ class Result(object):
             isFile = os.path.exists(data)
         except:
             isFile = False
+
+        if iterparse is None:
+            iterparse = isFile
 
         if not iterparse:
             #Method 1 : full parsing at once
@@ -315,7 +322,10 @@ class Result(object):
             #Method 2 : iter parsing (memory friendly)
             #WARNING Issue #198
             if not isFile:
-                data = StringIO(data)
+                if isinstance(data, bytes):
+                    data = BytesIO(data)
+                else:
+                    data = StringIO(data)
             root = ET.iterparse(data, events=("start", "end"))
             elem_clss = {'node':Node, 'way':Way, 'relation':Relation}
             for event, child in root:

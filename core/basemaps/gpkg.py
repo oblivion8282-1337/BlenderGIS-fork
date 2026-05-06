@@ -111,14 +111,15 @@ class GeoPackage():
 				setattr(self._local, attr, None)
 		if conn is None:
 			conn = sqlite3.connect(self.dbPath, detect_types=detect_types)
-			# Performance PRAGMAs (idempotent): WAL for concurrent reads, async
-			# fsync, in-memory temp tables, ~20MB page cache, 256MB mmap window.
+			# Per-connection PRAGMAs. WAL is intentionally off (its read
+			# concurrency does nothing under the GIL, and the doubled I/O
+			# slows bulk seeds 2-3x). synchronous=OFF skips the post-commit
+			# fsync — at power-loss the last in-flight tile batch can vanish,
+			# but the DB stays consistent via the rollback journal, and tile
+			# data is regenerable (the server re-fetches it on cache miss).
 			try:
-				conn.execute("PRAGMA journal_mode=WAL")
-				conn.execute("PRAGMA synchronous=NORMAL")
+				conn.execute("PRAGMA synchronous=OFF")
 				conn.execute("PRAGMA temp_store=MEMORY")
-				conn.execute("PRAGMA cache_size=-20000")
-				conn.execute("PRAGMA mmap_size=268435456")
 			except Exception:
 				log.debug('Could not apply SQLite performance pragmas', exc_info=True)
 			setattr(self._local, attr, conn)
