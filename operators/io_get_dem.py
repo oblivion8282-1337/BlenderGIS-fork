@@ -71,7 +71,12 @@ class IMPORTGIS_OT_dem_query(Operator):
 				self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
 				return {'CANCELLED'}
 
-		#return self.execute(context)
+		# Skip the props dialog if everything is already configured in addon prefs.
+		# Only show it when an opentopography server is selected without an API key.
+		prefs = context.preferences.addons[PKG].preferences
+		if 'opentopography' not in prefs.demServer or prefs.opentopography_api_key:
+			return self.execute(context)
+
 		return context.window_manager.invoke_props_dialog(self)#, width=350)
 
 	def draw(self,context):
