@@ -1711,13 +1711,19 @@ class BGIS_OT_test_opentopography_key(Operator):
 	bl_description = "Send a small test request to verify the entered API key works"
 	bl_options = {'INTERNAL'}
 
+	def _popup(self, context, title, msg, icon='INFO'):
+		def draw(self, ctx):
+			for line in msg.split('\n'):
+				self.layout.label(text=line)
+		context.window_manager.popup_menu(draw, title=title, icon=icon)
+
 	def execute(self, context):
 		from urllib.request import Request, urlopen
 		from urllib.error import URLError, HTTPError
 		prefs = context.preferences.addons[PKG].preferences
 		key = prefs.opentopography_api_key
 		if not key:
-			self.report({'ERROR'}, "No API key entered")
+			self._popup(context, "Missing key", "No API key entered.", icon='ERROR')
 			return {'CANCELLED'}
 		# Tiny bbox over Munich — well inside SRTM coverage, ~1km square.
 		url = (
@@ -1736,21 +1742,29 @@ class BGIS_OT_test_opentopography_key(Operator):
 			except Exception:
 				body = ''
 			if e.code in (401, 403):
-				self.report({'ERROR'}, "API key rejected by OpenTopography (HTTP %d)" % e.code)
+				self._popup(context, "Key rejected",
+					"OpenTopography returned HTTP %d.\nThe API key is invalid or revoked." % e.code,
+					icon='ERROR')
 			else:
-				self.report({'ERROR'}, "OpenTopography returned HTTP %d: %s" % (e.code, body[:120]))
+				self._popup(context, "Test failed",
+					"HTTP %d from OpenTopography:\n%s" % (e.code, body[:120]),
+					icon='ERROR')
 			return {'CANCELLED'}
 		except URLError as e:
-			self.report({'ERROR'}, "Network error: %s" % e.reason)
+			self._popup(context, "Network error", str(e.reason), icon='ERROR')
 			return {'CANCELLED'}
 		except Exception as e:
-			self.report({'ERROR'}, "Test failed: %s" % e)
+			self._popup(context, "Test failed", str(e), icon='ERROR')
 			return {'CANCELLED'}
 		# TIFF magic bytes: 'II' little-endian or 'MM' big-endian.
 		if head[:2] in (b'II', b'MM'):
-			self.report({'INFO'}, "API key is valid")
+			self._popup(context, "API key is valid",
+				"OpenTopography accepted the key and returned a GeoTIFF.",
+				icon='CHECKMARK')
 			return {'FINISHED'}
-		self.report({'WARNING'}, "Got HTTP 200 but response is not a GeoTIFF (key may be invalid)")
+		self._popup(context, "Unexpected response",
+			"HTTP 200 but the body is not a GeoTIFF — the key may be invalid.",
+			icon='ERROR')
 		return {'CANCELLED'}
 
 
