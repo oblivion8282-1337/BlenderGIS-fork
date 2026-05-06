@@ -1,5 +1,6 @@
 # -*- coding:utf-8 -*-
 import os
+import threading
 import bpy
 import bmesh
 import mathutils
@@ -18,306 +19,439 @@ from ..geoscene import GeoScene
 
 from ..core.proj import SRS
 
+# ---------------------------------------------------------------------------
+# Module-level state for background SHP export
+# ---------------------------------------------------------------------------
+_shp_state_lock = threading.Lock()
+_shp_thread = None
+_shp_result = None   # dict: {'ok': bool, 'error': str, 'filePath': str}
+
+
+def _shp_write_thread(filePath, shapeType, fieldDefs, records, wkt, result_holder):
+    """Phase B: run in a background thread.
+
+    All inputs are plain Python objects (no bpy). Writes the SHP/DBF files
+    and optionally a .prj sidecar.
+
+    Parameters
+    ----------
+    filePath  : str  – destination .shp path
+    shapeType : int  – shapefile shape-type constant (POINTZ / POLYLINEZ / …)
+    fieldDefs : list – list of (name, type, length, decimal) tuples that
+                       describe every field in the schema
+    records   : list – list of dicts, each with keys:
+                       'geom_type'  : one of 'pointz', 'multipointz',
+                                      'linez', 'polyz'
+                       'geom'       : the geometry argument for the writer call
+                       'nFeat'      : int, how many records to emit for this obj
+                       'attributes' : dict of field-name → value
+    wkt       : str or None  – CRS WKT string for .prj sidecar
+    result_holder : dict     – shared result dict (written under no lock here;
+                               caller reads it only after thread joins)
+    """
+    try:
+        outShp = shpWriter(filePath)
+        outShp.shapeType = shapeType
+
+        # Recreate field schema
+        for fdef in fieldDefs:
+            name, ftype, length, decimal = fdef
+            if decimal:
+                outShp.field(name, ftype, length, decimal)
+            else:
+                outShp.field(name, ftype, length)
+
+        # Write geometries + records
+        for rec in records:
+            gtype = rec['geom_type']
+            geom  = rec['geom']
+            attrs = rec['attributes']
+
+            if gtype == 'pointz':
+                outShp.pointz(*geom)
+            elif gtype == 'multipointz':
+                outShp.multipointz(geom)
+            elif gtype == 'linez':
+                outShp.linez(geom)
+            elif gtype == 'polyz':
+                outShp.polyz(geom)
+
+            outShp.record(**attrs)
+
+        outShp.close()
+
+        # Write .prj sidecar
+        if wkt is not None:
+            prjPath = os.path.splitext(filePath)[0] + '.prj'
+            with open(prjPath, 'w') as prj:
+                prj.write(wkt)
+
+        with _shp_state_lock:
+            result_holder['ok'] = True
+
+    except Exception as e:
+        log.error('SHP export thread failed', exc_info=True)
+        with _shp_state_lock:
+            result_holder['ok'] = False
+            result_holder['error'] = str(e)
+
+
 class EXPORTGIS_OT_shapefile(Operator, ExportHelper):
-	"""Export from ESRI shapefile file format (.shp)"""
-	bl_idname = "exportgis.shapefile" # important since its how bpy.ops.import.shapefile is constructed (allows calling operator from python console or another script)
-	#bl_idname rules: must contain one '.' (dot) charactere, no capital letters, no reserved words (like 'import')
-	bl_description = 'export to ESRI shapefile file format (.shp)'
-	bl_label = "Export SHP"
-	bl_options = {"UNDO"}
+    """Export from ESRI shapefile file format (.shp)"""
+    bl_idname = "exportgis.shapefile" # important since its how bpy.ops.import.shapefile is constructed (allows calling operator from python console or another script)
+    #bl_idname rules: must contain one '.' (dot) charactere, no capital letters, no reserved words (like 'import')
+    bl_description = 'export to ESRI shapefile file format (.shp)'
+    bl_label = "Export SHP"
+    bl_options = {"UNDO"}
 
 
-	# ExportHelper class properties
-	filename_ext = ".shp"
-	filter_glob: StringProperty(
-			default = "*.shp",
-			options = {'HIDDEN'},
-			)
+    # ExportHelper class properties
+    filename_ext = ".shp"
+    filter_glob: StringProperty(
+            default = "*.shp",
+            options = {'HIDDEN'},
+            )
 
-	exportType: EnumProperty(
-			name = "Feature type",
-			description = "Select feature type",
-			items = [
-				('POINTZ', 'Point', ""),
-				('POLYLINEZ', 'Line', ""),
-				('POLYGONZ', 'Polygon', "")
-			])
+    exportType: EnumProperty(
+            name = "Feature type",
+            description = "Select feature type",
+            items = [
+                ('POINTZ', 'Point', ""),
+                ('POLYLINEZ', 'Line', ""),
+                ('POLYGONZ', 'Polygon', "")
+            ])
 
-	objectsSource: EnumProperty(
-			name = "Objects",
-			description = "Objects to export",
-			items = [
-				('COLLEC', 'Collection', "Export a collection of objects"),
-				('SELECTED', 'Selected objects', "Export the current selection")
-			],
-			default = 'SELECTED'
-			)
+    objectsSource: EnumProperty(
+            name = "Objects",
+            description = "Objects to export",
+            items = [
+                ('COLLEC', 'Collection', "Export a collection of objects"),
+                ('SELECTED', 'Selected objects', "Export the current selection")
+            ],
+            default = 'SELECTED'
+            )
 
-	def listCollections(self, context):
-		return [(c.name, c.name, "Collection") for c in bpy.data.collections]
+    def listCollections(self, context):
+        return [(c.name, c.name, "Collection") for c in bpy.data.collections]
 
-	selectedColl: EnumProperty(
-		name = "Collection",
-		description = "Select the collection to export",
-		items = listCollections)
+    selectedColl: EnumProperty(
+        name = "Collection",
+        description = "Select the collection to export",
+        items = listCollections)
 
-	mode: EnumProperty(
-			name = "Mode",
-			description = "Select the export strategy",
-			items = [
-				('OBJ2FEAT', 'Objects to features', "Create one multipart feature per object"),
-				('MESH2FEAT', 'Mesh to features', "Decompose mesh primitives to separate features")
-			],
-			default = 'OBJ2FEAT'
-			)
-
-
-	@classmethod
-	def poll(cls, context):
-		return context.mode == 'OBJECT'
-
-	def draw(self, context):
-		#Function used by blender to draw the panel.
-		layout = self.layout
-		layout.prop(self, 'objectsSource')
-		if self.objectsSource == 'COLLEC':
-			layout.prop(self, 'selectedColl')
-		layout.prop(self, 'mode')
-		layout.prop(self, 'exportType')
-
-	def execute(self, context):
-		filePath = self.filepath
-		folder = os.path.dirname(filePath)
-		scn = context.scene
-		geoscn = GeoScene(scn)
-
-		if geoscn.isGeoref:
-			dx, dy = geoscn.getOriginPrj()
-			crs = SRS(geoscn.crs)
-			try:
-				wkt = crs.getWKT()
-			except Exception as e:
-				log.warning('Cannot convert crs to wkt', exc_info=True)
-				wkt = None
-		elif geoscn.isBroken:
-			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
-			return {'CANCELLED'}
-		else:
-			dx, dy = (0, 0)
-			wkt = None
-
-		if self.objectsSource == 'SELECTED':
-			objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-		elif self.objectsSource == 'COLLEC':
-			try:
-				coll = bpy.data.collections[self.selectedColl]
-			except KeyError:
-				self.report({'ERROR'}, "Collection '{}' not found".format(self.selectedColl))
-				return {'CANCELLED'}
-			objects = [obj for obj in coll.all_objects if obj.type == 'MESH']
-
-		if not objects:
-			self.report({'ERROR'}, "Selection is empty or does not contain any mesh")
-			return {'CANCELLED'}
+    mode: EnumProperty(
+            name = "Mode",
+            description = "Select the export strategy",
+            items = [
+                ('OBJ2FEAT', 'Objects to features', "Create one multipart feature per object"),
+                ('MESH2FEAT', 'Mesh to features', "Decompose mesh primitives to separate features")
+            ],
+            default = 'OBJ2FEAT'
+            )
 
 
-		outShp = shpWriter(filePath)
-		try:
-			if self.exportType == 'POLYGONZ':
-				outShp.shapeType = POLYGONZ #15
-			if self.exportType == 'POLYLINEZ':
-				outShp.shapeType = POLYLINEZ #13
-			if self.exportType == 'POINTZ' and self.mode == 'MESH2FEAT':
-				outShp.shapeType = POINTZ
-			if self.exportType == 'POINTZ' and self.mode == 'OBJ2FEAT':
-				outShp.shapeType = MULTIPOINTZ
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
 
-			#create fields (all needed fields sould be created before adding any new record)
-			#TODO more robust evaluation, and check for boolean and date types
-			cLen = 255 #string fields default length
-			nLen = 20 #numeric fields default length
-			dLen = 5 #numeric fields default decimal precision
-			maxFieldNameLen = 8 #shp capabilities limit field name length to 8 characters
-			outShp.field('objId','N', nLen) #export id
-			# Track declared field names in a set so the per-property check below
-			# is O(1) instead of O(N_fields) per property per object.
-			knownFields = {f[0] for f in outShp.fields}
-			# fieldNameMap: origKey (full property name) → resolved shp field name.
-			# truncToOrig:  truncated-8-char name → the first origKey that claimed it.
-			# Together these detect when two different keys share the same truncation.
-			fieldNameMap = {}
-			truncToOrig = {}
-			for obj in objects:
-				for k, v in obj.items():
-					origKey = k
-					if origKey in fieldNameMap:
-						# Already resolved in an earlier object; reuse the same name.
-						k = fieldNameMap[origKey]
-					else:
-						k = origKey[0:maxFieldNameLen]
-						# Resolve collision: if this truncated name is already claimed by a
-						# *different* original key, append a numeric suffix within 8 chars.
-						if k in truncToOrig and truncToOrig[k] != origKey:
-							suffix_n = 1
-							while True:
-								suffix = '_' + str(suffix_n)
-								candidate = k[0:maxFieldNameLen - len(suffix)] + suffix
-								if candidate not in knownFields:
-									log.warning(
-										"Field name collision: '{}' truncated to '{}' conflicts "
-										"with an existing field; renamed to '{}'.".format(
-											origKey, k, candidate))
-									k = candidate
-									break
-								suffix_n += 1
-						else:
-							truncToOrig[k] = origKey
-						fieldNameMap[origKey] = k
-					#evaluate the field type with the first value
-					if k not in knownFields:
-						if isinstance(v, float) or isinstance(v, int):
-							fieldType = 'N'
-						elif isinstance(v, str):
-							if v.lstrip("-+").isdigit():
-								v = int(v)
-								fieldType = 'N'
-							else:
-								try:
-									v = float(v)
-								except ValueError:
-									fieldType = 'C'
-								else:
-									fieldType = 'N'
-						else:
-							continue
+    def draw(self, context):
+        #Function used by blender to draw the panel.
+        layout = self.layout
+        layout.prop(self, 'objectsSource')
+        if self.objectsSource == 'COLLEC':
+            layout.prop(self, 'selectedColl')
+        layout.prop(self, 'mode')
+        layout.prop(self, 'exportType')
 
-						if fieldType == 'C':
-							outShp.field(k, fieldType, cLen)
-						elif fieldType == 'N':
-							if isinstance(v, int):
-								outShp.field(k, fieldType, nLen, 0)
-							else:
-								outShp.field(k, fieldType, nLen, dLen)
-						knownFields.add(k)
+    def execute(self, context):
+        # ------------------------------------------------------------------
+        # Phase A – Main-Thread: bpy/bmesh data extraction
+        # Everything here touches bpy; must run in the main thread.
+        # ------------------------------------------------------------------
+        filePath = self.filepath
+        scn = context.scene
+        geoscn = GeoScene(scn)
+
+        if geoscn.isGeoref:
+            dx, dy = geoscn.getOriginPrj()
+            crs = SRS(geoscn.crs)
+            try:
+                wkt = crs.getWKT()
+            except Exception as e:
+                log.warning('Cannot convert crs to wkt', exc_info=True)
+                wkt = None
+        elif geoscn.isBroken:
+            self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
+            return {'CANCELLED'}
+        else:
+            dx, dy = (0, 0)
+            wkt = None
+
+        if self.objectsSource == 'SELECTED':
+            objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+        elif self.objectsSource == 'COLLEC':
+            try:
+                coll = bpy.data.collections[self.selectedColl]
+            except KeyError:
+                self.report({'ERROR'}, "Collection '{}' not found".format(self.selectedColl))
+                return {'CANCELLED'}
+            objects = [obj for obj in coll.all_objects if obj.type == 'MESH']
+
+        if not objects:
+            self.report({'ERROR'}, "Selection is empty or does not contain any mesh")
+            return {'CANCELLED'}
+
+        # --- Determine shape type ---
+        if self.exportType == 'POLYGONZ':
+            shapeType = POLYGONZ
+        elif self.exportType == 'POLYLINEZ':
+            shapeType = POLYLINEZ
+        elif self.exportType == 'POINTZ' and self.mode == 'MESH2FEAT':
+            shapeType = POINTZ
+        else:  # POINTZ + OBJ2FEAT
+            shapeType = MULTIPOINTZ
+
+        # --- Build field schema (collision detection preserved from original) ---
+        cLen = 255  # string fields default length
+        nLen = 20   # numeric fields default length
+        dLen = 5    # numeric fields default decimal precision
+        maxFieldNameLen = 8  # shp capabilities limit field name length to 8 characters
+
+        # fieldDefs: ordered list of (name, type, length, decimal) for Phase B
+        fieldDefs = [('objId', 'N', nLen, 0)]
+        knownFields = {'objId'}
+
+        # fieldNameMap: origKey → resolved shp field name
+        # truncToOrig:  truncated-8-char name → the first origKey that claimed it
+        fieldNameMap = {}
+        truncToOrig = {}
+
+        for obj in objects:
+            for k, v in obj.items():
+                origKey = k
+                if origKey in fieldNameMap:
+                    k = fieldNameMap[origKey]
+                else:
+                    k = origKey[0:maxFieldNameLen]
+                    if k in truncToOrig and truncToOrig[k] != origKey:
+                        suffix_n = 1
+                        while True:
+                            suffix = '_' + str(suffix_n)
+                            candidate = k[0:maxFieldNameLen - len(suffix)] + suffix
+                            if candidate not in knownFields:
+                                log.warning(
+                                    "Field name collision: '{}' truncated to '{}' conflicts "
+                                    "with an existing field; renamed to '{}'.".format(
+                                        origKey, k, candidate))
+                                k = candidate
+                                break
+                            suffix_n += 1
+                    else:
+                        truncToOrig[k] = origKey
+                    fieldNameMap[origKey] = k
+
+                if k not in knownFields:
+                    if isinstance(v, float) or isinstance(v, int):
+                        fieldType = 'N'
+                    elif isinstance(v, str):
+                        if v.lstrip("-+").isdigit():
+                            v = int(v)
+                            fieldType = 'N'
+                        else:
+                            try:
+                                v = float(v)
+                            except ValueError:
+                                fieldType = 'C'
+                            else:
+                                fieldType = 'N'
+                    else:
+                        continue
+
+                    if fieldType == 'C':
+                        fieldDefs.append((k, fieldType, cLen, 0))
+                    elif fieldType == 'N':
+                        if isinstance(v, int):
+                            fieldDefs.append((k, fieldType, nLen, 0))
+                        else:
+                            fieldDefs.append((k, fieldType, nLen, dLen))
+                    knownFields.add(k)
+
+        # fieldTypes snapshot for attribute casting (same logic as original)
+        fieldTypes = {fd[0]: fd[1] for fd in fieldDefs}
+        fieldNames = list(fieldTypes.keys())
+
+        # --- Extract geometry + attributes from bmesh (still Main-Thread) ---
+        depsgraph = context.evaluated_depsgraph_get()
+        records = []  # list of dicts for Phase B
+
+        for i, obj in enumerate(objects):
+            bm = bmesh.new()
+            bm.from_object(obj, depsgraph)
+            bm.transform(obj.matrix_world)
+
+            if self.exportType == 'POINTZ':
+                if len(bm.verts) == 0:
+                    bm.free()
+                    continue
+                pts = [[v.co.x + dx, v.co.y + dy, v.co.z] for v in bm.verts]
+
+                attributes = _build_attributes(i, obj, fieldNameMap, fieldTypes, fieldNames)
+
+                if self.mode == 'MESH2FEAT':
+                    for pt in pts:
+                        records.append({
+                            'geom_type': 'pointz',
+                            'geom': pt,
+                            'attributes': attributes,
+                        })
+                elif self.mode == 'OBJ2FEAT':
+                    records.append({
+                        'geom_type': 'multipointz',
+                        'geom': pts,
+                        'attributes': attributes,
+                    })
+
+            elif self.exportType == 'POLYLINEZ':
+                if len(bm.edges) == 0:
+                    bm.free()
+                    continue
+                lines = [
+                    [(vert.co.x + dx, vert.co.y + dy, vert.co.z) for vert in edge.verts]
+                    for edge in bm.edges
+                ]
+                attributes = _build_attributes(i, obj, fieldNameMap, fieldTypes, fieldNames)
+
+                if self.mode == 'MESH2FEAT':
+                    for line in lines:
+                        records.append({
+                            'geom_type': 'linez',
+                            'geom': [line],
+                            'attributes': attributes,
+                        })
+                elif self.mode == 'OBJ2FEAT':
+                    records.append({
+                        'geom_type': 'linez',
+                        'geom': lines,
+                        'attributes': attributes,
+                    })
+
+            elif self.exportType == 'POLYGONZ':
+                if len(bm.faces) == 0:
+                    bm.free()
+                    continue
+                polygons = []
+                for face in bm.faces:
+                    poly = [(vert.co.x + dx, vert.co.y + dy, vert.co.z) for vert in face.verts]
+                    poly.append(poly[0])  # close poly
+                    poly.reverse()        # clockwise for shapefiles
+                    polygons.append(poly)
+                attributes = _build_attributes(i, obj, fieldNameMap, fieldTypes, fieldNames)
+
+                if self.mode == 'MESH2FEAT':
+                    for polygon in polygons:
+                        records.append({
+                            'geom_type': 'polyz',
+                            'geom': [polygon],
+                            'attributes': attributes,
+                        })
+                elif self.mode == 'OBJ2FEAT':
+                    records.append({
+                        'geom_type': 'polyz',
+                        'geom': polygons,
+                        'attributes': attributes,
+                    })
+
+            bm.free()
+
+        if not records:
+            self.report({'ERROR'}, "No geometry to export (empty meshes?)")
+            return {'CANCELLED'}
+
+        # ------------------------------------------------------------------
+        # Phase B – Background Thread: file I/O (no bpy)
+        # ------------------------------------------------------------------
+        global _shp_thread, _shp_result
+
+        # Doppelklick-Guard
+        with _shp_state_lock:
+            if _shp_thread is not None and _shp_thread.is_alive():
+                self.report({'INFO'}, "Export already running, please wait...")
+                return {'CANCELLED'}
+            _shp_result = {'ok': None, 'error': None, 'filePath': filePath}
+            _shp_thread = threading.Thread(
+                target=_shp_write_thread,
+                args=(filePath, shapeType, fieldDefs, records, wkt, _shp_result),
+                daemon=True)
+            _shp_thread.start()
+
+        self.report({'INFO'}, "Exporting SHP in background, please wait...")
+
+        # Register polling timer (closure captures module globals via 'global')
+        def _poll_shp_thread():
+            global _shp_thread, _shp_result
+            with _shp_state_lock:
+                if _shp_thread is None or _shp_thread.is_alive():
+                    return 0.5  # poll again in 0.5 s
+                # Thread finished – consume state
+                _shp_thread = None
+                result = _shp_result
+                _shp_result = None
+
+            if not result or not result.get('ok'):
+                err = result.get('error', 'Unknown error') if result else 'No result'
+                log.error('SHP export failed: %s', err)
+                try:
+                    bpy.context.window.cursor_set('DEFAULT')
+                except Exception:
+                    pass
+                return None  # stop timer
+
+            fp = result.get('filePath', '')
+            log.info('SHP export complete: %s', fp)
+            try:
+                bpy.context.window.cursor_set('DEFAULT')
+            except Exception:
+                pass
+            return None  # stop timer
+
+        bpy.app.timers.register(_poll_shp_thread, first_interval=0.5)
+
+        return {'FINISHED'}
 
 
-			# Snapshot field type lookups once; outShp.fields no longer changes
-			# after the schema-build loop above. Avoids quadratic re-scans below.
-			fieldTypes = {f[0]: f[1] for f in outShp.fields}
-			fieldNames = list(fieldTypes.keys())
-			for i, obj in enumerate(objects):
+def _build_attributes(obj_idx, obj, fieldNameMap, fieldTypes, fieldNames):
+    """Build the attribute dict for one object (called in Main-Thread during Phase A).
 
-				loc = obj.location
-				bm = bmesh.new()
-				bm.from_object(obj, context.evaluated_depsgraph_get())
-				#bmesh.from_object 'deform=True' arg allows to consider modifier deformation ->> deprecated since Blender 3.0
-				bm.transform(obj.matrix_world)
-
-				nFeat = 1
-
-				if self.exportType == 'POINTZ':
-					if len(bm.verts) == 0:
-						continue
-
-					#Extract coords & adjust values against georef deltas
-					pts = [[v.co.x+dx, v.co.y+dy, v.co.z] for v in bm.verts]
-
-
-					if self.mode == 'MESH2FEAT':
-						for j, pt in enumerate(pts):
-							outShp.pointz(*pt)
-						nFeat = len(pts)
-					elif self.mode == 'OBJ2FEAT':
-						outShp.multipointz(pts)
-
-
-				if self.exportType == 'POLYLINEZ':
-
-					if len(bm.edges) == 0:
-						continue
-
-					lines = []
-					for edge in bm.edges:
-						#Extract coords & adjust values against georef deltas
-						line = [(vert.co.x+dx, vert.co.y+dy, vert.co.z) for vert in edge.verts]
-						lines.append(line)
-
-					if self.mode == 'MESH2FEAT':
-						for j, line in enumerate(lines):
-							outShp.linez([line])
-						nFeat = len(lines)
-					elif self.mode == 'OBJ2FEAT':
-						outShp.linez(lines)
-
-
-				if self.exportType == 'POLYGONZ':
-
-					if len(bm.faces) == 0:
-						continue
-
-					#build geom
-					polygons = []
-					for face in bm.faces:
-						#Extract coords & adjust values against georef deltas
-						poly = [(vert.co.x+dx, vert.co.y+dy, vert.co.z) for vert in face.verts]
-						poly.append(poly[0])#close poly
-						#In Blender face is up if points are in anticlockwise order
-						#for shapefiles, face's up with clockwise order
-						poly.reverse()
-						polygons.append(poly)
-
-					if self.mode == 'MESH2FEAT':
-						for j, polygon in enumerate(polygons):
-							outShp.polyz([polygon])
-						nFeat = len(polygons)
-					elif self.mode == 'OBJ2FEAT':
-						outShp.polyz(polygons)
-
-
-				#Writing attributes Data
-				attributes = {'objId':i}
-				for k, v in obj.items():
-					# Use the resolved field name (handles truncation + collision suffix)
-					k = fieldNameMap.get(k, k[0:maxFieldNameLen])
-					fType = fieldTypes.get(k)
-					if fType is None:
-						continue
-					if fType in ('N', 'F'):
-						try:
-							v = float(v)
-						except ValueError:
-							log.info('Cannot cast value {} to float for appending field {}, NULL value will be inserted instead'.format(v, k))
-							v = None
-					attributes[k] = v
-				#assign None to orphans shp fields (if the key does not exists in the custom props of this object)
-				for fn in fieldNames:
-					if fn not in attributes:
-						attributes[fn] = None
-				#Write
-				for n in range(nFeat):
-					outShp.record(**attributes)
-
-
-		finally:
-			outShp.close()
-
-		if wkt is not None:
-			prjPath = os.path.splitext(filePath)[0] + '.prj'
-			with open(prjPath, "w") as prj:
-				prj.write(wkt)
-
-		self.report({'INFO'}, "Export complete")
-
-		return {'FINISHED'}
+    Returns a plain dict with field-name → value suitable for ``shpWriter.record(**attrs)``.
+    """
+    attributes = {'objId': obj_idx}
+    for k, v in obj.items():
+        k = fieldNameMap.get(k, k[0:8])
+        fType = fieldTypes.get(k)
+        if fType is None:
+            continue
+        if fType in ('N', 'F'):
+            try:
+                v = float(v)
+            except (ValueError, TypeError):
+                log.info(
+                    'Cannot cast value %r to float for field %s, NULL inserted', v, k)
+                v = None
+        attributes[k] = v
+    # Orphan fields → None
+    for fn in fieldNames:
+        if fn not in attributes:
+            attributes[fn] = None
+    return attributes
 
 
 def register():
-	try:
-		bpy.utils.register_class(EXPORTGIS_OT_shapefile)
-	except ValueError as e:
-		log.warning('{} is already registered, now unregister and retry... '.format(EXPORTGIS_OT_shapefile))
-		unregister()
-		bpy.utils.register_class(EXPORTGIS_OT_shapefile)
+    try:
+        bpy.utils.register_class(EXPORTGIS_OT_shapefile)
+    except ValueError as e:
+        log.warning('{} is already registered, now unregister and retry... '.format(EXPORTGIS_OT_shapefile))
+        unregister()
+        bpy.utils.register_class(EXPORTGIS_OT_shapefile)
 
 def unregister():
-	bpy.utils.unregister_class(EXPORTGIS_OT_shapefile)
+    bpy.utils.unregister_class(EXPORTGIS_OT_shapefile)

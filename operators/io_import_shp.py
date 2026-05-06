@@ -1,5 +1,6 @@
 # -*- coding:utf-8 -*-
 import os, sys, time
+import threading
 import bpy
 from bpy.props import StringProperty, BoolProperty, EnumProperty, IntProperty
 from bpy.types import Operator
@@ -60,6 +61,18 @@ featureType={
 28:'MultiPointM',
 31:'MultiPatch'
 }
+
+
+# Module-level state for background shapefile parse/reproject phase.
+# Phase A (file read + reproject + 3D geom assembly) runs in a worker thread.
+# Phase C (bmesh / mesh / object creation, extrude_discrete_faces) runs on the
+# main thread via bpy.app.timers, because bmesh.ops and bpy.data are not
+# thread-safe. The DropToGround raycaster also calls into bpy, so when
+# elevSource == 'OBJ' we fall back to synchronous (single-threaded) execution.
+_shp_state_lock = threading.Lock()
+_shp_thread = None
+_shp_result = None       # dict, populated by worker; consumed by polling cb
+_shp_context_args = None # operator-side parameters needed by polling cb
 
 
 """
@@ -319,6 +332,213 @@ class IMPORTGIS_OT_shapefile_props_dialog(Operator):
 		return{'FINISHED'}
 
 
+def _shp_parse_thread(filepath, shpCRS, sceneCRS, elevSource, fieldElevName,
+                      fieldExtrudeName, fieldObjName, separateObjects,
+                      result_holder):
+	"""Worker thread: read shapefile, reproject, build per-feature 3D geom.
+
+	Pure file/CPU work — no bpy / bmesh access. Results are stashed in
+	result_holder under the lock; the polling callback reads them out and
+	performs all bpy / bmesh / mesh operations on the main thread.
+	"""
+	try:
+		# --- Open shapefile (honour .cpg sidecar encoding) -----------------
+		cpg_enc = _read_cpg_encoding(filepath)
+		if cpg_enc:
+			log.info("Using DBF encoding from .cpg sidecar: %s", cpg_enc)
+			shp = shpReader(filepath, encoding=cpg_enc)
+		else:
+			shp = shpReader(filepath)
+
+		shpType = featureType[shp.shapeType]
+		log.info('Feature type : ' + shpType)
+		if shpType not in ['Point','PolyLine','Polygon','PointZ','PolyLineZ','PolygonZ']:
+			raise RuntimeError(
+				"Cannot process multipoint, multipointZ, pointM, polylineM, "
+				"polygonM and multipatch feature type")
+
+		# --- Field index resolution ----------------------------------------
+		fields = [f for f in shp.fields if f[0] != 'DeletionFlag']
+		fieldsNames = [f[0] for f in fields]
+		log.debug("DBF fields : " + str(fieldsNames))
+
+		useDbf = bool(separateObjects or fieldElevName or fieldObjName or fieldExtrudeName)
+
+		nameFieldIdx = None
+		if fieldObjName and separateObjects:
+			try:
+				nameFieldIdx = fieldsNames.index(fieldObjName)
+			except Exception:
+				raise RuntimeError("Unable to find name field")
+
+		zFieldIdx = None
+		if fieldElevName:
+			try:
+				zFieldIdx = fieldsNames.index(fieldElevName)
+			except Exception:
+				raise RuntimeError("Unable to find elevation field")
+			if fields[zFieldIdx][1] not in ['N', 'F', 'L']:
+				raise RuntimeError("Elevation field do not contains numeric values")
+
+		extrudeFieldIdx = None
+		if fieldExtrudeName:
+			try:
+				extrudeFieldIdx = fieldsNames.index(fieldExtrudeName)
+			except ValueError:
+				raise RuntimeError("Unable to find extrusion field")
+			if fields[extrudeFieldIdx][1] not in ['N', 'F', 'L']:
+				raise RuntimeError("Extrusion field do not contains numeric values")
+
+		# --- Reprojector ---------------------------------------------------
+		rprj = None
+		if sceneCRS != shpCRS:
+			log.info("Data will be reprojected from {} to {}".format(shpCRS, sceneCRS))
+			rprj = Reproj(shpCRS, sceneCRS)
+			if rprj.iproj == 'EPSGIO' and shp.numRecords > 100:
+				raise RuntimeError(
+					"Reprojection through online epsg.io engine is limited "
+					"to 100 features. \nPlease install GDAL or pyproj module.")
+
+		# --- Bounding box (in scene CRS) -----------------------------------
+		bbox = BBOX(shp.bbox)
+		if rprj is not None:
+			bbox = rprj.bbox(bbox)
+
+		# --- Iterate features and assemble plain Python data ---------------
+		# We do NOT yet shift by (dx, dy) because the scene origin may need to
+		# be set on the main thread (GeoScene mutation is bpy state). The
+		# polling callback picks (dx, dy) and shifts coords there.
+		if useDbf:
+			shpIter = shp.iterShapeRecords()
+		else:
+			shpIter = shp.iterShapes()
+		nbFeats = shp.numRecords
+
+		# parsed_features: list of dicts, one per feature, each with:
+		#   'parts': list of list-of-(x,y,z) tuples (already reprojected, NOT shifted)
+		#   'record': raw record (or None if !useDbf)
+		#   'offset': float extrusion offset (or None)
+		#   'name':   str name (or None)
+		parsed_features = []
+
+		for featIdx, feat in enumerate(shpIter):
+			if useDbf:
+				shape = feat.shape
+				record = feat.record
+			else:
+				shape = feat
+				record = None
+
+			# Progress (worker-thread print is fine for large jobs)
+			report_every = max(1, nbFeats // 10)
+			if featIdx % report_every == 0:
+				pourcent = round(((featIdx+1)*100)/nbFeats)
+				if pourcent == 100:
+					print(str(pourcent)+'%')
+				else:
+					print(str(pourcent), end="%, ")
+				sys.stdout.flush()
+
+			# Multipart handling
+			if shpType == 'PointZ' or shpType == 'Point':
+				partsIdx = [0]
+			else:
+				try:
+					partsIdx = shape.parts
+				except Exception as e:
+					log.warning('Cannot access "parts" attribute for feature {} : {}'.format(featIdx, e))
+					partsIdx = [0]
+			nbParts = len(partsIdx)
+
+			pts = shape.points
+			nbPts = len(pts)
+
+			if nbPts == 0:
+				continue
+
+			# Reproject (handle Z together if GEOM elevation on Z shape)
+			zList = None
+			useGeomZ = (shpType[-1] == 'Z' and elevSource == 'GEOM')
+			if rprj is not None:
+				if useGeomZ:
+					zList = list(shape.z)
+					reprojected = rprj.pts3D([(pt[0], pt[1], zList[k]) for k, pt in enumerate(pts)])
+					pts = [(p[0], p[1]) for p in reprojected]
+					zList = [p[2] for p in reprojected]
+				else:
+					pts = rprj.pts(pts)
+
+			# Extrusion offset
+			offset = None
+			if fieldExtrudeName:
+				try:
+					offset = float(record[extrudeFieldIdx])
+				except Exception as e:
+					log.warning('Cannot extract extrusion value for feature {} : {}'.format(featIdx, e))
+					offset = 0
+
+			# Build per-part 3D point list (no dx/dy shift yet, no raycast yet)
+			parts = []
+			for j in range(nbParts):
+				idx1 = partsIdx[j]
+				idx2 = nbPts if j+1 == nbParts else partsIdx[j+1]
+
+				geom = []
+				for k, pt in enumerate(pts[idx1:idx2]):
+					if elevSource == 'FIELD':
+						try:
+							z = float(record[zFieldIdx])
+						except Exception as e:
+							log.warning('Cannot extract elevation value for feature {} : {}'.format(featIdx, e))
+							z = 0
+					elif shpType[-1] == 'Z' and elevSource == 'GEOM':
+						z = zList[idx1+k] if zList is not None else shape.z[idx1:idx2][k]
+					else:
+						# OBJ raycaster runs on main thread; placeholder z=0 for
+						# now, polling cb will overwrite via raycaster
+						z = 0
+					geom.append((pt[0], pt[1], z))
+
+				parts.append(geom)
+
+			# Name extraction (decoded immediately so worker can hand off str)
+			name = None
+			if separateObjects and fieldObjName and record is not None and nameFieldIdx is not None:
+				try:
+					raw = record[nameFieldIdx]
+				except Exception as e:
+					log.warning('Cannot extract name value for feature {} : {}'.format(featIdx, e))
+					raw = ''
+				if isinstance(raw, bytes):
+					name = ''
+				else:
+					name = str(raw) if raw is not None else ''
+
+			parsed_features.append({
+				'parts': parts,
+				'record': record,
+				'offset': offset,
+				'name': name,
+			})
+
+		with _shp_state_lock:
+			result_holder['ok'] = True
+			result_holder['shp_fields'] = list(shp.fields)  # for attribute write-back
+			result_holder['shpType'] = shpType
+			result_holder['bbox'] = bbox
+			result_holder['features'] = parsed_features
+			result_holder['useDbf'] = useDbf
+			result_holder['nameFieldIdx'] = nameFieldIdx
+			result_holder['zFieldIdx'] = zFieldIdx
+			result_holder['extrudeFieldIdx'] = extrudeFieldIdx
+
+	except Exception as e:
+		log.error('Shapefile parse worker failed', exc_info=True)
+		with _shp_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = str(e)
+
+
 class IMPORTGIS_OT_shapefile(Operator):
 	"""Import from ESRI shapefile file format (.shp)"""
 
@@ -358,465 +578,336 @@ class IMPORTGIS_OT_shapefile(Operator):
 		return context.mode == 'OBJECT'
 
 	def execute(self, context):
-		# FIX: initialise to None so the outer finally can safely free them
-		# even if a CANCELLED return happens before bmesh.new() is called
-		bm = None
-		finalBm = None
-		try:
+		# Validate scene georef on the main thread (touches bpy state).
+		geoscn = GeoScene()
+		if geoscn.isBroken:
+			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
+			return {'CANCELLED'}
 
-			prefs = bpy.context.preferences.addons[PKG].preferences
-
-			#Set cursor representation to 'loading' icon
-			w = context.window
-			w.cursor_set('WAIT')
-			t0 = perf_clock()
-
-			bpy.ops.object.select_all(action='DESELECT')
-
-			#Path
-			shpName = os.path.basename(self.filepath)[:-4]
-
-			#Get shp reader (honour .cpg sidecar encoding for the DBF, if present)
-			log.info("Read shapefile...")
+		shpCRS = self.shpCRS
+		if not geoscn.hasCRS:
 			try:
-				cpg_enc = _read_cpg_encoding(self.filepath)
-				if cpg_enc:
-					log.info("Using DBF encoding from .cpg sidecar: %s", cpg_enc)
-					shp = shpReader(self.filepath, encoding=cpg_enc)
-				else:
-					shp = shpReader(self.filepath)
-			except Exception as e:
-				log.error("Unable to read shapefile", exc_info=True)
-				self.report({'ERROR'}, "Unable to read shapefile, check logs")
+				geoscn.crs = shpCRS
+			except Exception:
+				log.error("Cannot set scene crs", exc_info=True)
+				self.report({'ERROR'}, "Cannot set scene crs, check logs for more infos")
 				return {'CANCELLED'}
 
-			#Check shape type
-			shpType = featureType[shp.shapeType]
-			log.info('Feature type : ' + shpType)
-			if shpType not in ['Point','PolyLine','Polygon','PointZ','PolyLineZ','PolygonZ']:
-				self.report({'ERROR'}, "Cannot process multipoint, multipointZ, pointM, polylineM, polygonM and multipatch feature type")
+		# Double-click guard: refuse a second concurrent run.
+		global _shp_thread, _shp_result, _shp_context_args
+		with _shp_state_lock:
+			if _shp_thread is not None and _shp_thread.is_alive():
+				self.report({'INFO'}, "Shapefile import already running, please wait...")
 				return {'CANCELLED'}
 
-			if self.elevSource != 'FIELD':
-				self.fieldElevName = ''
+			_shp_result = {'ok': None, 'error': None}
+			_shp_context_args = {
+				'filepath': self.filepath,
+				'shpCRS': shpCRS,
+				'sceneCRS': geoscn.crs,
+				'elevSource': self.elevSource,
+				'objElevName': self.objElevName,
+				'fieldElevName': self.fieldElevName,
+				'fieldExtrudeName': self.fieldExtrudeName,
+				'fieldObjName': self.fieldObjName,
+				'extrusionAxis': self.extrusionAxis,
+				'separateObjects': self.separateObjects,
+				't0': perf_clock(),
+			}
+			_shp_thread = threading.Thread(
+				target=_shp_parse_thread,
+				args=(
+					self.filepath,
+					shpCRS,
+					geoscn.crs,
+					self.elevSource,
+					self.fieldElevName,
+					self.fieldExtrudeName,
+					self.fieldObjName,
+					self.separateObjects,
+					_shp_result,
+				),
+				daemon=True,
+			)
+			_shp_thread.start()
 
-			if self.elevSource == 'OBJ':
-				scn = bpy.context.scene
-				try:
-					elevObj = scn.objects[self.objElevName]
-				except KeyError:
-					self.report({'ERROR'}, "Elevation object '{}' not found in scene".format(self.objElevName))
-					return {'CANCELLED'}
-				# Use BVH method: builds a BVHTree once instead of paying obj.ray_cast
-				# overhead per vertex. Roughly 5-10x faster on large shapefiles.
-				rayCaster = DropToGround(scn, elevObj, method='BVH')
+		# Set wait cursor + deselect (main-thread bpy ops, safe here).
+		w = context.window
+		w.cursor_set('WAIT')
+		bpy.ops.object.select_all(action='DESELECT')
+		self.report({'INFO'}, "Reading shapefile in background, please wait...")
 
-			#Get fields
-			fields = [field for field in shp.fields if field[0] != 'DeletionFlag'] #ignore default DeletionFlag field
-			fieldsNames = [field[0] for field in fields]
-			log.debug("DBF fields : "+str(fieldsNames))
+		bpy.app.timers.register(_poll_shp_thread, first_interval=0.5)
+		return {'FINISHED'}
 
-			if self.separateObjects or self.fieldElevName or self.fieldObjName or self.fieldExtrudeName:
-				self.useDbf = True
-			else:
-				self.useDbf = False
 
-			if self.fieldObjName and self.separateObjects:
-				try:
-					nameFieldIdx = fieldsNames.index(self.fieldObjName)
-				except Exception as e:
-					log.error('Unable to find name field', exc_info=True)
-					self.report({'ERROR'}, "Unable to find name field")
-					return {'CANCELLED'}
+def _poll_shp_thread():
+	"""Main-thread polling callback: drain worker, then build bmesh/objects.
 
-			if self.fieldElevName:
-				try:
-					zFieldIdx = fieldsNames.index(self.fieldElevName)
-				except Exception as e:
-					log.error('Unable to find elevation field', exc_info=True)
-					self.report({'ERROR'}, "Unable to find elevation field")
-					return {'CANCELLED'}
+	Phase C (mesh build, extrude_discrete_faces, object creation, optional
+	raycast for elevSource=='OBJ') runs entirely here on the main thread.
+	"""
+	global _shp_thread, _shp_result, _shp_context_args
+	with _shp_state_lock:
+		if _shp_thread is None or _shp_thread.is_alive():
+			return 0.5  # poll again
+		# Worker finished — consume state under lock
+		_shp_thread = None
+		result = _shp_result
+		args = _shp_context_args
+		_shp_result = None
+		_shp_context_args = None
 
-				if fields[zFieldIdx][1] not in ['N', 'F', 'L'] :
-					self.report({'ERROR'}, "Elevation field do not contains numeric values")
-					return {'CANCELLED'}
+	# Restore cursor at the very end no matter what
+	def _restore_cursor():
+		try:
+			bpy.context.window.cursor_set('DEFAULT')
+		except Exception:
+			pass
 
-			if self.fieldExtrudeName:
-				try:
-					extrudeFieldIdx = fieldsNames.index(self.fieldExtrudeName)
-				except ValueError:
-					log.error('Unable to find extrusion field', exc_info=True)
-					self.report({'ERROR'}, "Unable to find extrusion field")
-					return {'CANCELLED'}
+	if not result or not result.get('ok'):
+		err = result.get('error', 'Unknown error') if result else 'No result'
+		log.error('Shapefile parse failed: %s', err)
+		_restore_cursor()
+		return None  # stop timer
 
-				if fields[extrudeFieldIdx][1] not in ['N', 'F', 'L'] :
-					self.report({'ERROR'}, "Extrusion field do not contains numeric values")
-					return {'CANCELLED'}
+	# --- Unpack worker result + execute params ------------------------------
+	shpType = result['shpType']
+	bbox = result['bbox']
+	features = result['features']
+	shp_fields = result['shp_fields']
+	useDbf = result['useDbf']
+	zFieldIdx = result['zFieldIdx']
+	extrudeFieldIdx = result['extrudeFieldIdx']
 
-			#Get shp and scene georef infos
-			shpCRS = self.shpCRS
-			geoscn = GeoScene()
-			if geoscn.isBroken:
-				self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
-				return {'CANCELLED'}
+	filepath = args['filepath']
+	elevSource = args['elevSource']
+	objElevName = args['objElevName']
+	fieldElevName = args['fieldElevName']
+	fieldExtrudeName = args['fieldExtrudeName']
+	fieldObjName = args['fieldObjName']
+	extrusionAxis = args['extrusionAxis']
+	separateObjects = args['separateObjects']
+	t0 = args['t0']
 
-			scale = geoscn.scale #TODO
+	context = bpy.context
+	scn = context.scene
+	geoscn = GeoScene()
 
-			if not geoscn.hasCRS: #if not geoscn.isGeoref:
-				try:
-					geoscn.crs = shpCRS
-				except Exception as e:
-					log.error("Cannot set scene crs", exc_info=True)
-					self.report({'ERROR'}, "Cannot set scene crs, check logs for more infos")
-					return {'CANCELLED'}
+	bm = None
+	finalBm = None
+	try:
+		prefs = bpy.context.preferences.addons[PKG].preferences
 
-			#Init reprojector class
-			if geoscn.crs != shpCRS:
-				log.info("Data will be reprojected from {} to {}".format(shpCRS, geoscn.crs))
-				try:
-					rprj = Reproj(shpCRS, geoscn.crs)
-				except Exception as e:
-					log.error('Reprojection fails', exc_info=True)
-					self.report({'ERROR'}, "Unable to reproject data, check logs for more infos.")
-					return {'CANCELLED'}
-				if rprj.iproj == 'EPSGIO':
-					if shp.numRecords > 100:
-						self.report({'ERROR'}, "Reprojection through online epsg.io engine is limited to 100 features. \nPlease install GDAL or pyproj module.")
-						return {'CANCELLED'}
+		# Resolve raycaster on main thread (DropToGround uses bpy/BVHTree).
+		rayCaster = None
+		if elevSource == 'OBJ':
+			try:
+				elevObj = scn.objects[objElevName]
+			except KeyError:
+				log.error("Elevation object '{}' not found in scene".format(objElevName))
+				return None
+			# BVH method: ~5-10x faster than per-vertex obj.ray_cast on big shp.
+			rayCaster = DropToGround(scn, elevObj, method='BVH')
 
-			#Get bbox
-			bbox = BBOX(shp.bbox)
-			if geoscn.crs != shpCRS:
-				bbox = rprj.bbox(bbox)
+		shpName = os.path.basename(filepath)[:-4]
 
-			#Get or set georef dx, dy
-			if not geoscn.isGeoref:
-				dx, dy = bbox.center
-				geoscn.setOriginPrj(dx, dy)
-			else:
-				dx, dy = geoscn.getOriginPrj()
+		# Origin (dx, dy) — needs main thread because it may write to GeoScene.
+		if not geoscn.isGeoref:
+			dx, dy = bbox.center
+			geoscn.setOriginPrj(dx, dy)
+		else:
+			dx, dy = geoscn.getOriginPrj()
 
-			#Get reader iterator (using iterator avoids loading all data in memory)
-			#warn, shp with zero field will return an empty shapeRecords() iterator
-			#to prevent this issue, iter only on shapes if there is no field required
-			if self.useDbf:
-				#Note: using shapeRecord solve the issue where number of shapes does not match number of table records
-				#because it iter only on features with geom and record
-				shpIter = shp.iterShapeRecords()
-			else:
-				shpIter = shp.iterShapes()
-			nbFeats = shp.numRecords
+		# --- BMesh build ----------------------------------------------------
+		bm = bmesh.new()
+		if not separateObjects and fieldExtrudeName:
+			finalBm = bmesh.new()
 
-			#Create an empty BMesh
-			bm = bmesh.new()
-			#Extrusion is exponentially slow with large bmesh
-			#it's fastest to extrude a small bmesh and then join it to a final large bmesh
-			if not self.separateObjects and self.fieldExtrudeName:
-				finalBm = bmesh.new()
+		if separateObjects:
+			layer = bpy.data.collections.new(shpName)
+			context.scene.collection.children.link(layer)
+			created_objects = []
 
-			progress = -1
+		for featIdx, feat in enumerate(features):
+			parts = feat['parts']
+			record = feat['record']
+			offset = feat['offset']
 
-			if self.separateObjects:
-				layer = bpy.data.collections.new(shpName)
-				context.scene.collection.children.link(layer)
-				created_objects = [] #collect objects for deferred selection
+			for geom_part in parts:
+				# Apply main-thread Z resolution for OBJ elevation source.
+				if elevSource == 'OBJ' and rayCaster is not None:
+					resolved = []
+					for (x, y, _z) in geom_part:
+						rcHit = rayCaster.rayCast(x=x-dx, y=y-dy)
+						# DropToGround returns hit.loc in world coords; .z is the
+						# vertical we want to attach to the (shifted) vertex.
+						resolved.append((x, y, rcHit.loc.z))
+					geom_part = resolved
 
-			#Main iteration over features
-			for featIdx, feat in enumerate(shpIter):
-
-				if self.useDbf:
-					shape = feat.shape
-					record = feat.record
+				# Shift coords (relative to scene origin)
+				if elevSource == 'OBJ':
+					# Z is already the raycast hit z (world); only shift x/y.
+					shifted = [(p[0]-dx, p[1]-dy, p[2]) for p in geom_part]
 				else:
-					shape = feat
+					shifted = [(p[0]-dx, p[1]-dy, p[2]) for p in geom_part]
 
-				#Progress infos
-				report_every = max(1, nbFeats // 10)
-				if featIdx % report_every == 0:
-					pourcent = round(((featIdx+1)*100)/nbFeats)
-					if pourcent == 100:
-						print(str(pourcent)+'%')
-					else:
-						print(str(pourcent), end="%, ")
-					sys.stdout.flush() #we need to flush or it won't print anything until after the loop has finished
+				# POINTS
+				if shpType == 'PointZ' or shpType == 'Point':
+					vert = [bm.verts.new(pt) for pt in shifted]
+					if fieldExtrudeName and offset and offset > 0:
+						vect = (0, 0, offset)
+						res = bmesh.ops.extrude_vert_indiv(bm, verts=vert)
+						verts = res['verts']
+						bmesh.ops.translate(bm, verts=verts, vec=vect)
 
-				#Deal with multipart features
-				#If the shape record has multiple parts, the 'parts' attribute will contains the index of
-				#the first point of each part. If there is only one part then a list containing 0 is returned
-				if (shpType == 'PointZ' or shpType == 'Point'): #point layer has no attribute 'parts'
-					partsIdx = [0]
-				else:
-					try: #prevent "_shape object has no attribute parts" error
-						partsIdx = shape.parts
-					except Exception as e:
-						log.warning('Cannot access "parts" attribute for feature {} : {}'.format(featIdx, e))
-						partsIdx = [0]
-				nbParts = len(partsIdx)
+				# LINES
+				if shpType == 'PolyLine' or shpType == 'PolyLineZ':
+					verts = [bm.verts.new(pt) for pt in shifted]
+					edges = []
+					for ev in range(len(shifted)-1):
+						edge = bm.edges.new([verts[ev], verts[ev+1]])
+						edges.append(edge)
+					if fieldExtrudeName and offset and offset > 0:
+						vect = (0, 0, offset)
+						res = bmesh.ops.extrude_edge_only(bm, edges=edges)
+						verts = [elem for elem in res['geom'] if isinstance(elem, bmesh.types.BMVert)]
+						bmesh.ops.translate(bm, verts=verts, vec=vect)
 
-				#Get list of shape's points
-				pts = shape.points
-				nbPts = len(pts)
-
-				#Skip null geom
-				if nbPts == 0:
-					continue #go to next iteration of the loop
-
-				#Reproj geom — for Z shapes with GEOM elevation, project (x,y,z)
-				#together so vertical-datum changes are honoured.
-				zList = None
-				useGeomZ = (shpType[-1] == 'Z' and self.elevSource == 'GEOM')
-				if geoscn.crs != shpCRS:
-					if useGeomZ:
-						zList = list(shape.z)
-						reprojected = rprj.pts3D([(pt[0], pt[1], zList[k]) for k, pt in enumerate(pts)])
-						pts = [(p[0], p[1]) for p in reprojected]
-						zList = [p[2] for p in reprojected]
-					else:
-						pts = rprj.pts(pts)
-
-				#Get extrusion offset
-				if self.fieldExtrudeName:
-					try:
-						offset = float(record[extrudeFieldIdx])
-					except Exception as e:
-						log.warning('Cannot extract extrusion value for feature {} : {}'.format(featIdx, e))
-						offset = 0 #null values will be set to zero
-
-				#Iter over parts
-				for j in range(nbParts):
-
-					# EXTRACT 3D GEOM
-
-					geom = [] #will contains a list of 3d points
-
-					#Find first and last part index
-					idx1 = partsIdx[j]
-					if j+1 == nbParts:
-						idx2 = nbPts
-					else:
-						idx2 = partsIdx[j+1]
-
-					#Build 3d geom
-					for k, pt in enumerate(pts[idx1:idx2]):
-
-						if self.elevSource == 'OBJ':
-							rcHit = rayCaster.rayCast(x=pt[0]-dx, y=pt[1]-dy)
-							z = rcHit.loc.z #will be automatically set to zero if not rcHit.hit
-
-						elif self.elevSource == 'FIELD':
-							try:
-								z = float(record[zFieldIdx])
-							except Exception as e:
-								log.warning('Cannot extract elevation value for feature {} : {}'.format(featIdx, e))
-								z = 0 #null values will be set to zero
-
-						elif shpType[-1] == 'Z' and self.elevSource == 'GEOM':
-							# Use reprojected Z if we did 3D reproj above; otherwise fall back to raw shape.z.
-							z = zList[idx1+k] if zList is not None else shape.z[idx1:idx2][k]
-
-						else:
-							z = 0
-
-						geom.append((pt[0], pt[1], z))
-
-					#Shift coords
-					geom = [(pt[0]-dx, pt[1]-dy, pt[2]) for pt in geom]
-
-
-					# BUILD BMESH
-
-					# POINTS
-					if (shpType == 'PointZ' or shpType == 'Point'):
-						vert = [bm.verts.new(pt) for pt in geom]
-						#Extrusion
-						if self.fieldExtrudeName and offset > 0:
-							vect = (0, 0, offset) #along Z
-							result = bmesh.ops.extrude_vert_indiv(bm, verts=vert)
-							verts = result['verts']
-							bmesh.ops.translate(bm, verts=verts, vec=vect)
-
-					# LINES
-					if (shpType == 'PolyLine' or shpType == 'PolyLineZ'):
-						verts = [bm.verts.new(pt) for pt in geom]
-						edges = []
-						for ev in range(len(geom)-1):
-							edge = bm.edges.new( [verts[ev], verts[ev+1] ])
-							edges.append(edge)
-						#Extrusion
-						if self.fieldExtrudeName and offset > 0:
-							vect = (0, 0, offset) # along Z
-							result = bmesh.ops.extrude_edge_only(bm, edges=edges)
-							verts = [elem for elem in result['geom'] if isinstance(elem, bmesh.types.BMVert)]
-							bmesh.ops.translate(bm, verts=verts, vec=vect)
-
-					# NGONS
-					if (shpType == 'Polygon' or shpType == 'PolygonZ'):
-						#According to the shapefile spec, polygons points are clockwise and polygon holes are counterclockwise
-						#in Blender face is up if points are in anticlockwise order
-						geom.reverse() #face up
-						geom.pop() #exlude last point because it's the same as first pt
-						if len(geom) >= 3: #needs 3 points to get a valid face
-							verts = [bm.verts.new(pt) for pt in geom]
-							face = bm.faces.new(verts)
-							#update normal to avoid null vector
-							face.normal_update()
-							if face.normal.z < 0: #this is a polygon hole, bmesh cannot handle polygon hole
-								pass #TODO
-							#Extrusion
-							if self.fieldExtrudeName and offset > 0:
-								#build translate vector
-								if self.extrusionAxis == 'NORMAL':
-									normal = face.normal
-									vect = normal * offset
-								elif self.extrusionAxis == 'Z':
-									vect = (0, 0, offset)
-								faces = bmesh.ops.extrude_discrete_faces(bm, faces=[face]) #return {'faces': [BMFace]}
-								verts = faces['faces'][0].verts
-								if self.elevSource == 'OBJ':
-									# Making flat roof (TODO add an user input parameter to setup this behaviour)
-									z = max([v.co.z for v in verts]) + offset #get max z coord
-									for v in verts:
-										v.co.z = z
-								else:
-									##result = bmesh.ops.extrude_face_region(bm, geom=[face]) #return dict {"geom":[BMVert, BMEdge, BMFace]}
-									##verts = [elem for elem in result['geom'] if isinstance(elem, bmesh.types.BMVert)] #geom type filter
-									bmesh.ops.translate(bm, verts=verts, vec=vect)
-
-
-				if self.separateObjects:
-
-					if self.fieldObjName:
-						try:
-							name = record[nameFieldIdx]
-						except Exception as e:
-							log.warning('Cannot extract name value for feature {} : {}'.format(featIdx, e))
-							name = ''
-						# null values will return a bytes object containing a blank string of length equal to fields length definition
-						if isinstance(name, bytes):
-							name = ''
-						else:
-							name = str(name)
-					else:
-						name = shpName
-
-					#Calc bmesh bbox
-					_bbox = getBBOX.fromBmesh(bm)
-
-					#Calc bmesh geometry origin and translate coords according to it
-					#then object location will be set to initial bmesh origin
-					#its a work around to bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY')
-					ox, oy, oz = _bbox.center
-					oz = _bbox.zmin
-					bmesh.ops.translate(bm, verts=bm.verts, vec=(-ox, -oy, -oz))
-
-					#Create new mesh from bmesh
-					mesh = bpy.data.meshes.new(name)
-					bm.to_mesh(mesh)
-					bm.clear()
-
-					#Place obj
-					obj = bpy.data.objects.new(name, mesh)
-					layer.objects.link(obj)
-					obj.location = (ox, oy, oz)
-					created_objects.append(obj)
-
-					# bpy operators can be very cumbersome when scene contains lot of objects
-					# because it cause implicit scene updates calls
-					# so we must avoid using operators when created many objects with the 'separate objects' option)
-					##bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY')
-
-					#write attributes data
-					for fi, field in enumerate(shp.fields):
-						fieldName, fieldType, fieldLength, fieldDecLength = field
-						if fieldName != 'DeletionFlag':
-							if fieldType in ('N', 'F'):
-								v = record[fi-1]
-								if v is not None:
-									#cast to float to avoid overflow error when affecting custom property
-									obj[fieldName] = float(record[fi-1])
+				# NGONS
+				if shpType == 'Polygon' or shpType == 'PolygonZ':
+					# Polygons clockwise in shapefile spec; reverse for face-up.
+					poly = list(shifted)
+					poly.reverse()
+					if poly:
+						poly.pop()  # last == first
+					if len(poly) >= 3:
+						verts = [bm.verts.new(pt) for pt in poly]
+						face = bm.faces.new(verts)
+						face.normal_update()
+						if face.normal.z < 0:
+							pass  # polygon hole — bmesh can't represent
+						if fieldExtrudeName and offset and offset > 0:
+							if extrusionAxis == 'NORMAL':
+								normal = face.normal
+								vect = normal * offset
+							elif extrusionAxis == 'Z':
+								vect = (0, 0, offset)
+							faces = bmesh.ops.extrude_discrete_faces(bm, faces=[face])
+							verts = faces['faces'][0].verts
+							if elevSource == 'OBJ':
+								# Flat roof: lift all verts to max z + offset.
+								z = max([v.co.z for v in verts]) + offset
+								for v in verts:
+									v.co.z = z
 							else:
-								obj[fieldName] = record[fi-1]
+								bmesh.ops.translate(bm, verts=verts, vec=vect)
 
-				elif self.fieldExtrudeName:
-					#Join to final bmesh via direct bmesh copying (no temp mesh)
-					_vert_offset = len(finalBm.verts)
-					bm.verts.ensure_lookup_table()
-					for v in bm.verts:
-						finalBm.verts.new(v.co)
-					finalBm.verts.ensure_lookup_table()
-					for f in bm.faces:
+			# --- Per-feature finalisation when separateObjects=True ---------
+			if separateObjects:
+				if fieldObjName:
+					name = feat['name'] if feat['name'] is not None else ''
+				else:
+					name = shpName
+
+				_bbox = getBBOX.fromBmesh(bm)
+				ox, oy, oz = _bbox.center
+				oz = _bbox.zmin
+				bmesh.ops.translate(bm, verts=bm.verts, vec=(-ox, -oy, -oz))
+
+				mesh = bpy.data.meshes.new(name)
+				bm.to_mesh(mesh)
+				bm.clear()
+
+				obj = bpy.data.objects.new(name, mesh)
+				layer.objects.link(obj)
+				obj.location = (ox, oy, oz)
+				created_objects.append(obj)
+
+				# Write attribute data as custom properties.
+				for fi, field in enumerate(shp_fields):
+					fieldName, fieldType, fieldLength, fieldDecLength = field
+					if fieldName != 'DeletionFlag' and record is not None:
+						if fieldType in ('N', 'F'):
+							v = record[fi-1]
+							if v is not None:
+								obj[fieldName] = float(record[fi-1])
+						else:
+							obj[fieldName] = record[fi-1]
+
+			elif fieldExtrudeName:
+				# Periodic flush into final bmesh to keep extrude perf stable.
+				_vert_offset = len(finalBm.verts)
+				bm.verts.ensure_lookup_table()
+				for v in bm.verts:
+					finalBm.verts.new(v.co)
+				finalBm.verts.ensure_lookup_table()
+				for f in bm.faces:
+					try:
+						finalBm.faces.new([finalBm.verts[v.index + _vert_offset] for v in f.verts])
+					except ValueError:
+						pass
+				for e in bm.edges:
+					if not e.link_faces:
 						try:
-							finalBm.faces.new([finalBm.verts[v.index + _vert_offset] for v in f.verts])
+							finalBm.edges.new([finalBm.verts[v.index + _vert_offset] for v in e.verts])
 						except ValueError:
 							pass
-					for e in bm.edges:
-						if not e.link_faces:
-							try:
-								finalBm.edges.new([finalBm.verts[v.index + _vert_offset] for v in e.verts])
-							except ValueError:
-								pass
-					bm.clear()
+				bm.clear()
 
-			#Batch-apply selection for separate objects (deferred from the loop for performance)
-			if self.separateObjects and created_objects:
-				#Update the view layer once so all linked objects become visible
-				context.view_layer.update()
-				for obj in created_objects:
-					obj.select_set(True)
-				context.view_layer.objects.active = created_objects[-1]
-
-			#Write back the whole mesh
-			if not self.separateObjects:
-
-				mesh = bpy.data.meshes.new(shpName)
-
-				if self.fieldExtrudeName:
-					bm.free()
-					bm = finalBm
-					finalBm = None
-
-				if prefs.mergeDoubles:
-					bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
-				bm.to_mesh(mesh)
-
-				#Finish
-				#mesh.update(calc_edges=True)
-				obj = bpy.data.objects.new(shpName, mesh)
-				context.scene.collection.objects.link(obj)
-				context.view_layer.objects.active = obj
+		# Batch-apply selection for separate objects.
+		if separateObjects and created_objects:
+			context.view_layer.update()
+			for obj in created_objects:
 				obj.select_set(True)
-				bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY')
+			context.view_layer.objects.active = created_objects[-1]
 
-			#free the bmesh
-			bm.free()
-			bm = None
+		# Single-object path.
+		if not separateObjects:
+			mesh = bpy.data.meshes.new(shpName)
+			if fieldExtrudeName:
+				bm.free()
+				bm = finalBm
+				finalBm = None
 
-			t = perf_clock() - t0
-			log.info('Build in %f seconds' % t)
+			if prefs.mergeDoubles:
+				bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
+			bm.to_mesh(mesh)
 
-			#Adjust grid size
-			if prefs.adjust3Dview:
-				bbox.shift(-dx, -dy) #convert shapefile bbox in 3d view space
-				adjust3Dview(context, bbox)
+			obj = bpy.data.objects.new(shpName, mesh)
+			context.scene.collection.objects.link(obj)
+			context.view_layer.objects.active = obj
+			obj.select_set(True)
+			bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY')
 
+		bm.free()
+		bm = None
 
-			return {'FINISHED'}
-		finally:
+		t = perf_clock() - t0
+		log.info('Build in %f seconds' % t)
+
+		# Adjust grid size on main thread.
+		if prefs.adjust3Dview:
+			bbox.shift(-dx, -dy)
+			adjust3Dview(context, bbox)
+
+	except Exception:
+		log.error('Shapefile build failed on main thread', exc_info=True)
+	finally:
+		if bm is not None:
 			try:
-				bpy.context.window.cursor_set('DEFAULT')
+				bm.free()
 			except Exception:
 				pass
-			# FIX: free bmesh objects if an early CANCELLED return left them allocated
-			if bm is not None:
-				try:
-					bm.free()
-				except Exception:
-					pass
-			if finalBm is not None:
-				try:
-					finalBm.free()
-				except Exception:
-					pass
+		if finalBm is not None:
+			try:
+				finalBm.free()
+			except Exception:
+				pass
+		_restore_cursor()
+
+	return None  # stop timer
+
 
 classes = [
 	IMPORTGIS_OT_shapefile_file_dialog,

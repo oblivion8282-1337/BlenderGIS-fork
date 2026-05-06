@@ -2,6 +2,7 @@ import os
 import time
 import json
 import random
+import threading
 
 import logging
 log = logging.getLogger(__name__)
@@ -12,6 +13,16 @@ from bpy.types import Operator, Panel, AddonPreferences
 from bpy.props import StringProperty, IntProperty, FloatProperty, BoolProperty, EnumProperty, FloatVectorProperty
 
 from .lib.osm import overpy
+
+# ---------------------------------------------------------------------------
+# Module-level state for non-blocking OSM imports.
+# Phase A (network/XML parse) runs in a background thread; Phase C (bmesh
+# building, bpy.data writes) runs in the main thread via bpy.app.timers.
+# ---------------------------------------------------------------------------
+_osm_state_lock = threading.Lock()
+_osm_thread = None
+_osm_result = None    # dict: {'ok': bool, 'data': overpy.Result | None, 'error': str | None, 'progress': str}
+_osm_args = None      # tuple of arguments needed by the polling callback to run Phase C
 
 from ..geoscene import GeoScene
 from .utils import adjust3Dview, getBBOX, DropToGround, isTopView, hasBasemapPlane
@@ -899,6 +910,138 @@ def joinBmesh(src_bm, dest_bm):
 				pass
 
 
+# ---------------------------------------------------------------------------
+# Background workers for non-blocking OSM import (Phase A only).
+# Phase C (bmesh build) is invoked from the polling callback in the main thread.
+# ---------------------------------------------------------------------------
+def _osm_query_worker(overpass_server, user_agent, query, result_holder):
+	"""Run an Overpass HTTP query in a background thread."""
+	try:
+		with _osm_state_lock:
+			result_holder['progress'] = 'querying overpass'
+		api = overpy.Overpass(overpass_server=overpass_server, user_agent=user_agent)
+		data = api.query(query)
+		with _osm_state_lock:
+			result_holder['ok'] = True
+			result_holder['data'] = data
+			result_holder['progress'] = 'done'
+	except Exception as e:
+		log.error('Overpass query failed (background)', exc_info=True)
+		with _osm_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = 'Overpass query failed: {}'.format(e)
+
+
+def _osm_parse_file_worker(filepath, result_holder):
+	"""Parse an OSM XML file in a background thread."""
+	try:
+		with _osm_state_lock:
+			result_holder['progress'] = 'parsing xml'
+		api = overpy.Overpass()
+		data = api.parse_xml(filepath)
+		with _osm_state_lock:
+			result_holder['ok'] = True
+			result_holder['data'] = data
+			result_holder['progress'] = 'done'
+	except Exception as e:
+		log.error('OSM file parse failed (background)', exc_info=True)
+		with _osm_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = 'OSM file parse failed: {}'.format(e)
+
+
+def _restore_cursor():
+	"""Best-effort restore the WAIT cursor set before the background thread started."""
+	try:
+		bpy.context.window.cursor_set('DEFAULT')
+	except Exception:
+		pass
+
+
+def _poll_osm_thread():
+	"""Timer callback: waits for Phase A (network/parse) to finish, then runs
+	Phase C (bmesh build) on the main thread. Returns None to stop the timer."""
+	global _osm_thread, _osm_result, _osm_args
+	with _osm_state_lock:
+		if _osm_thread is None or _osm_thread.is_alive():
+			return 0.5  # poll again
+		# Thread finished — drain state under the lock
+		_osm_thread = None
+		result = _osm_result
+		args = _osm_args
+		_osm_result = None
+		_osm_args = None
+
+	if not result or not result.get('ok'):
+		err = result.get('error', 'Unknown error') if result else 'No result'
+		log.error('OSM background phase failed: %s', err)
+		_restore_cursor()
+		return None
+
+	mode, op_snapshot, dstCRS = args
+	data = result['data']
+	context = bpy.context
+	scn = context.scene
+	geoscn = GeoScene(scn)
+
+	try:
+		# 'file' mode: set CRS/origin from result.bounds before build().
+		# 'query' mode: dstCRS is already pinned (geoscn.crs from execute()).
+		if mode == 'file':
+			bounds = data.bounds
+			if not bounds or 'minlon' not in bounds:
+				log.warning('OSM result has no bounds, cannot set scene georef')
+				_restore_cursor()
+				return None
+			lon = (bounds["minlon"] + bounds["maxlon"]) / 2
+			lat = (bounds["minlat"] + bounds["maxlat"]) / 2
+			if not geoscn.hasCRS:
+				try:
+					geoscn.crs = utm.lonlat_to_epsg(lon, lat)
+				except Exception:
+					log.error("Cannot set UTM CRS", exc_info=True)
+					_restore_cursor()
+					return None
+			if not geoscn.hasOriginPrj:
+				x, y = reprojPt(4326, geoscn.crs, lon, lat)
+				geoscn.setOriginPrj(x, y)
+			dstCRS = geoscn.crs
+
+		# Phase C: build meshes (must run on the main thread — bmesh + bpy.data)
+		t0 = perf_clock()
+		# Call the unbound build() on the snapshot namespace, since OSM_IMPORT.build
+		# only reads attributes from `self` and uses self.report().
+		OSM_IMPORT.build(op_snapshot, context, data, dstCRS)
+		t = perf_clock() - t0
+		log.info('OSM mesh build in %s seconds', round(t, 2))
+
+		# Count what we built so the user gets a meaningful summary.
+		n_nodes = len(getattr(data, 'nodes', []) or [])
+		n_ways = len(getattr(data, 'ways', []) or [])
+		n_rels = len(getattr(data, 'relations', []) or [])
+
+		bbox = getBBOX.fromScn(scn)
+		adjust3Dview(context, bbox, zoomToSelect=False)
+
+		# Status bar feedback — bpy.ops.* would need an operator instance; we use
+		# the workspace status bar text instead.
+		try:
+			context.workspace.status_text_set(
+				'OSM import complete: {} nodes, {} ways, {} relations'.format(
+					n_nodes, n_ways, n_rels))
+			# Clear the status text after a short delay so it doesn't linger.
+			bpy.app.timers.register(
+				lambda: (context.workspace.status_text_set(None), None)[1],
+				first_interval=4.0)
+		except Exception:
+			pass
+		log.info('OSM import complete: %d nodes, %d ways, %d relations',
+				n_nodes, n_ways, n_rels)
+	except Exception:
+		log.error('OSM Phase C (mesh build) failed', exc_info=True)
+	finally:
+		_restore_cursor()
+	return None  # stop the timer
 
 
 
@@ -1494,60 +1637,62 @@ class IMPORTGIS_OT_osm_file(Operator, OSM_IMPORT):
 		geoscn = GeoScene(scn)
 		if geoscn.isBroken:
 			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
+			_restore_cursor()
 			return {'CANCELLED'}
 
-		#Parse file
-		t0 = perf_clock()
-		api = overpy.Overpass()
 		# Block billion-laughs / entity-expansion DoS by refusing files with a
 		# DTD. Scan the whole file (capped at 32 MiB) instead of just the
 		# first 8 KiB so a leading whitespace/comment block can't smuggle
-		# the marker past the prefix check.
+		# the marker past the prefix check. This stays synchronous because it's
+		# fast on a memory-mapped read and the user must see the rejection now.
 		try:
 			MAX_SCAN = 32 * 1024 * 1024
 			with open(self.filepath, 'rb') as fh:
 				head = fh.read(MAX_SCAN).lower()
 			if b'<!doctype' in head or b'<!entity' in head:
 				self.report({'ERROR'}, "OSM file contains a DOCTYPE/ENTITY declaration; refused for safety")
+				_restore_cursor()
 				return {'CANCELLED'}
 		except OSError as e:
 			self.report({'ERROR'}, "Cannot read OSM file: {}".format(e))
+			_restore_cursor()
 			return {'CANCELLED'}
-		#with open(self.filepath, "r", encoding"utf-8") as f:
-		#	result = api.parse_xml(f.read()) #WARNING read() load all the file into memory
-		result = api.parse_xml(self.filepath)
-		t = perf_clock() - t0
-		log.info('File parsed in {} seconds'.format(round(t, 2)))
 
-		#Get bbox
-		bounds = result.bounds
-		if not bounds or 'minlon' not in bounds:
-			self.report({'WARNING'}, "OSM result has no bounds, cannot set scene georef")
-			return {'CANCELLED'}
-		lon = (bounds["minlon"] + bounds["maxlon"])/2
-		lat = (bounds["minlat"] + bounds["maxlat"])/2
-		#Set CRS
-		if not geoscn.hasCRS:
-			try:
-				geoscn.crs = utm.lonlat_to_epsg(lon, lat)
-			except Exception as e:
-				log.error("Cannot set UTM CRS", exc_info=True)
-				self.report({'ERROR'}, "Cannot set UTM CRS, check logs for more infos")
+		# Snapshot operator properties so the polling callback can run build()
+		# without depending on `self` staying alive past execute().
+		import types as _types
+		op_snapshot = _types.SimpleNamespace(
+			useElevObj = self.useElevObj,
+			objElevLst = self.objElevLst,
+			filterTags = set(self.filterTags),
+			featureType = set(self.featureType),
+			separate = self.separate,
+			buildingsExtrusion = self.buildingsExtrusion,
+			defaultHeight = self.defaultHeight,
+			levelHeight = self.levelHeight,
+			randomHeightThreshold = self.randomHeightThreshold,
+			report = lambda lvl, msg: log.warning('[osm_file/post] %s: %s', lvl, msg),
+		)
+
+		# Start background XML parse (guard against double-start)
+		global _osm_thread, _osm_result, _osm_args
+		with _osm_state_lock:
+			if _osm_thread is not None and _osm_thread.is_alive():
+				self.report({'INFO'}, "OSM import already running, please wait...")
+				_restore_cursor()
 				return {'CANCELLED'}
-		#Set scene origin georef
-		if not geoscn.hasOriginPrj:
-			x, y = reprojPt(4326, geoscn.crs, lon, lat)
-			geoscn.setOriginPrj(x, y)
+			_osm_result = {'ok': None, 'data': None, 'error': None, 'progress': 'starting'}
+			# 'file' tag distinguishes from 'query' — the polling callback uses it
+			# to decide which CRS-init branch to run after the parse completes.
+			_osm_args = ('file', op_snapshot, None)
+			_osm_thread = threading.Thread(
+				target=_osm_parse_file_worker,
+				args=(self.filepath, _osm_result),
+				daemon=True)
+			_osm_thread.start()
 
-		#Build meshes
-		t0 = perf_clock()
-		self.build(context, result, geoscn.crs)
-		t = perf_clock() - t0
-		log.info('Mesh build in {} seconds'.format(round(t, 2)))
-
-		bbox = getBBOX.fromScn(scn)
-		adjust3Dview(context, bbox)
-
+		self.report({'INFO'}, "OSM import running in background...")
+		bpy.app.timers.register(_poll_osm_thread, first_interval=0.5)
 		return {'FINISHED'}
 
 
@@ -1730,26 +1875,45 @@ class IMPORTGIS_OT_osm_query(Operator, OSM_IMPORT):
 		w = context.window
 		w.cursor_set('WAIT')
 
-		#Download from overpass api
+		#Build the Overpass query string (cheap, runs on the main thread)
 		log.debug('Requests overpass server : {}'.format(mask_url(prefs.overpassServer)))
-		api = overpy.Overpass(overpass_server=prefs.overpassServer, user_agent=USER_AGENT)
 		query = queryBuilder(bbox, tags=list(tags), types=list(types), format='xml')
 		log.debug('Overpass query : {}'.format(mask_text(query))) # can fails with non utf8 chars
 
-		try:
-			result = api.query(query)
-		except Exception as e:
-			log.error("Overpass query failed", exc_info=True)
-			self.report({'ERROR'}, "Overpass query failed, check logs for more infos.")
-			return {'CANCELLED'}
-		else:
-			log.info('Overpass query successful')
+		# Snapshot operator properties that build() reads; the polling timer cannot
+		# rely on `self` staying alive after execute() returns {'FINISHED'}.
+		import types as _types
+		op_snapshot = _types.SimpleNamespace(
+			useElevObj = self.useElevObj,
+			objElevLst = self.objElevLst,
+			filterTags = set(self.filterTags),
+			featureType = set(self.featureType),
+			separate = self.separate,
+			buildingsExtrusion = self.buildingsExtrusion,
+			defaultHeight = self.defaultHeight,
+			levelHeight = self.levelHeight,
+			randomHeightThreshold = self.randomHeightThreshold,
+			report = lambda lvl, msg: log.warning('[osm_query/post] %s: %s', lvl, msg),
+		)
+		dstCRS = geoscn.crs
 
-		self.build(context, result, geoscn.crs)
+		# Start background Overpass query (guard against double-start)
+		global _osm_thread, _osm_result, _osm_args
+		with _osm_state_lock:
+			if _osm_thread is not None and _osm_thread.is_alive():
+				self.report({'INFO'}, "OSM import already running, please wait...")
+				_restore_cursor()
+				return {'CANCELLED'}
+			_osm_result = {'ok': None, 'data': None, 'error': None, 'progress': 'starting'}
+			_osm_args = ('query', op_snapshot, dstCRS)
+			_osm_thread = threading.Thread(
+				target=_osm_query_worker,
+				args=(prefs.overpassServer, USER_AGENT, query, _osm_result),
+				daemon=True)
+			_osm_thread.start()
 
-		bbox = getBBOX.fromScn(scn)
-		adjust3Dview(context, bbox, zoomToSelect=False)
-
+		self.report({'INFO'}, "OSM import running in background...")
+		bpy.app.timers.register(_poll_osm_thread, first_interval=0.5)
 		return {'FINISHED'}
 
 _basemap_mesh_cache = None

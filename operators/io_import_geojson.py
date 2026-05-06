@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 log = logging.getLogger(__name__)
 
 import bpy
@@ -20,6 +21,20 @@ PKG = __package__.rsplit('.', maxsplit=1)[0]  # bl_ext.user_default.cartoblend
 DEFAULT_BUILDING_HEIGHT = 15.0
 # Meters per building level
 LEVEL_HEIGHT = 3.0
+
+
+# ---------------------------------------------------------------------------
+# Module-level state for background GeoJSON parsing (async pattern)
+# ---------------------------------------------------------------------------
+
+_geojson_state_lock = threading.Lock()
+_geojson_thread = None
+# Result dict set by worker thread, consumed by polling timer in main thread.
+# Keys on success: 'ok' True, 'parsed' dict with all data needed for Phase C.
+# Keys on error:   'ok' False, 'error' str.
+_geojson_result = None
+# Operator options captured before the thread starts (bpy is not thread-safe).
+_geojson_context_args = None
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +170,143 @@ def _first_coord(geojson):
 
 
 # ---------------------------------------------------------------------------
+# Phase A + B worker — runs in a background thread (NO bpy calls!)
+# ---------------------------------------------------------------------------
+
+def _geojson_parse_thread(filepath, dx, dy, dstCRS, buildingsExtrusion,
+                           defaultHeight, levelHeight, separate, result_holder):
+	"""Parse GeoJSON and reproject all features.  No bpy calls allowed here.
+
+	Produces pure-Python data structures that Phase C (main thread) turns into
+	Blender objects:
+
+	  parsed['features_separate']:
+	    list of dicts, one per feature (used when separate=True):
+	      {
+	        'cat': str,
+	        'feat_name': str,
+	        'gtype': str,
+	        'pts_3d': list of (x, y, z) tuples,
+	        'is_building': bool,
+	        'height_val': float | None,
+	        'props': dict,
+	      }
+
+	  parsed['features_merged']:
+	    dict  cat -> list of same dicts (used when separate=False)
+
+	  parsed['feat_count']: int
+	  parsed['skip_count']: int
+	  parsed['separate']:   bool  (echoed so Phase C knows which path to take)
+	"""
+	try:
+		# --- Phase A: parse JSON ---------------------------------------------------
+		with open(filepath, 'r', encoding='utf-8') as f:
+			geojson = json.load(f)
+
+		# --- Phase B: iterate + reproject -----------------------------------------
+		rprj = Reproj(4326, dstCRS)
+
+		features_separate = []    # used when separate=True
+		features_merged = {}      # cat -> list of feature dicts, used when separate=False
+
+		feat_count = 0
+		skip_count = 0
+
+		for geom, props in _iter_geometries(geojson):
+			gtype = geom.get("type", "")
+			coords = geom.get("coordinates")
+			if coords is None:
+				skip_count += 1
+				continue
+
+			feat_count += 1
+			feat_name = (props.get("name") or props.get("Name") or
+			             props.get("NAME") or str(feat_count))
+
+			# ----- Point ------------------------------------------------------------
+			if gtype == "Point":
+				cat = "Points"
+				pts_raw = [coords[:2]]
+
+			# ----- LineString -------------------------------------------------------
+			elif gtype == "LineString":
+				cat = "Lines"
+				if len(coords) < 2:
+					skip_count += 1
+					continue
+				pts_raw = [c[:2] for c in coords]
+
+			# ----- Polygon ----------------------------------------------------------
+			elif gtype == "Polygon":
+				cat = "Polygons"
+				ring = coords[0] if coords else []
+				if len(ring) < 3:
+					skip_count += 1
+					continue
+				if ring[0] == ring[-1]:
+					ring = ring[:-1]
+				if len(ring) < 3:
+					skip_count += 1
+					continue
+				pts_raw = [c[:2] for c in ring]
+
+			else:
+				skip_count += 1
+				continue
+
+			# Reproject
+			try:
+				pts_prj = rprj.pts(pts_raw)
+			except Exception:
+				log.warning("Reprojection failed for feature %s", feat_name, exc_info=True)
+				skip_count += 1
+				continue
+
+			# Shift to scene origin
+			pts_3d = [(p[0] - dx, p[1] - dy, 0.0) for p in pts_prj]
+
+			is_building = False
+			height_val = None
+			if gtype == "Polygon" and buildingsExtrusion:
+				height_val = _get_height_from_props(props, defaultHeight, levelHeight)
+				if height_val is not None:
+					is_building = True
+
+			feat_data = {
+				'cat': cat,
+				'feat_name': feat_name,
+				'gtype': gtype,
+				'pts_3d': pts_3d,
+				'is_building': is_building,
+				'height_val': height_val,
+				'props': props,
+			}
+
+			if separate:
+				features_separate.append(feat_data)
+			else:
+				bucket = features_merged.setdefault(cat, [])
+				bucket.append(feat_data)
+
+		with _geojson_state_lock:
+			result_holder['ok'] = True
+			result_holder['parsed'] = {
+				'features_separate': features_separate,
+				'features_merged': features_merged,
+				'feat_count': feat_count,
+				'skip_count': skip_count,
+				'separate': separate,
+			}
+
+	except Exception as exc:
+		with _geojson_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = str(exc)
+		log.error("GeoJSON background parse failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Operator
 # ---------------------------------------------------------------------------
 
@@ -237,18 +389,6 @@ class IMPORTGIS_OT_geojson_file(Operator):
 			pass
 		bpy.ops.object.select_all(action='DESELECT')
 
-		w = context.window
-		w.cursor_set('WAIT')
-
-		# --- Parse GeoJSON ------------------------------------------------------
-		try:
-			with open(self.filepath, 'r', encoding='utf-8') as f:
-				geojson = json.load(f)
-		except Exception as e:
-			log.error("Failed to parse GeoJSON", exc_info=True)
-			self.report({'ERROR'}, "Failed to parse GeoJSON: " + str(e))
-			return {'CANCELLED'}
-
 		# --- Scene CRS / origin --------------------------------------------------
 		scn = context.scene
 		geoscn = GeoScene(scn)
@@ -257,277 +397,331 @@ class IMPORTGIS_OT_geojson_file(Operator):
 			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
 			return {'CANCELLED'}
 
-		# Auto-set UTM CRS from first coordinate if scene has none
-		# Call _first_coord once and reuse the result for both CRS and origin.
-		_cached_first_coord = _first_coord(geojson) if (not geoscn.hasCRS or not geoscn.hasOriginPrj) else None
-		if not geoscn.hasCRS:
-			first = _cached_first_coord
-			if first is None:
-				self.report({'ERROR'}, "GeoJSON contains no usable coordinates")
-				return {'CANCELLED'}
-			lon, lat = first
+		# Auto-set UTM CRS / origin from first coordinate — must happen in main
+		# thread because _first_coord does json.load again (small but unavoidable
+		# duplication here; only runs when the scene has no CRS/origin yet).
+		if not geoscn.hasCRS or not geoscn.hasOriginPrj:
 			try:
-				geoscn.crs = utm.lonlat_to_epsg(lon, lat)
-			except Exception:
-				log.error("Cannot auto-set UTM CRS", exc_info=True)
-				self.report({'ERROR'}, "Cannot auto-set UTM CRS from first coordinate")
+				with open(self.filepath, 'r', encoding='utf-8') as f:
+					_geojson_probe = json.load(f)
+			except Exception as e:
+				self.report({'ERROR'}, "Failed to parse GeoJSON: " + str(e))
 				return {'CANCELLED'}
-			log.info("Auto-set scene CRS to %s", geoscn.crs)
 
-		if not geoscn.hasOriginPrj:
-			first = _cached_first_coord if _cached_first_coord is not None else _first_coord(geojson)
-			if first is not None:
+			_cached_first_coord = _first_coord(_geojson_probe)
+
+			if not geoscn.hasCRS:
+				first = _cached_first_coord
+				if first is None:
+					self.report({'ERROR'}, "GeoJSON contains no usable coordinates")
+					return {'CANCELLED'}
 				lon, lat = first
-				x, y = reprojPt(4326, geoscn.crs, lon, lat)
-				geoscn.setOriginPrj(x, y)
+				try:
+					geoscn.crs = utm.lonlat_to_epsg(lon, lat)
+				except Exception:
+					log.error("Cannot auto-set UTM CRS", exc_info=True)
+					self.report({'ERROR'}, "Cannot auto-set UTM CRS from first coordinate")
+					return {'CANCELLED'}
+				log.info("Auto-set scene CRS to %s", geoscn.crs)
+
+			if not geoscn.hasOriginPrj:
+				first = _cached_first_coord
+				if first is not None:
+					lon, lat = first
+					x, y = reprojPt(4326, geoscn.crs, lon, lat)
+					geoscn.setOriginPrj(x, y)
 
 		dstCRS = geoscn.crs
+		dx, dy = geoscn.crsx, geoscn.crsy
 
-		# Init reprojector  (EPSG:4326 -> scene CRS)
+		# Validate reprojector can be constructed before spawning thread
 		try:
-			rprj = Reproj(4326, dstCRS)
+			Reproj(4326, dstCRS)
 		except Exception:
 			log.error("Unable to initialise reprojection", exc_info=True)
 			self.report({'ERROR'}, "Unable to reproject data – check logs")
 			return {'CANCELLED'}
 
-		dx, dy = geoscn.crsx, geoscn.crsy
+		w = context.window
+		w.cursor_set('WAIT')
 
-		# --- Build geometry -------------------------------------------------------
+		# --- Capture scene reference for Phase C ---------------------------------
+		# Store scene name (string) so the timer callback can look it up via
+		# bpy.data.scenes (avoids holding a live bpy reference across threads).
+		scene_name = scn.name
 
-		# Accumulators for merged mode
-		bmeshes = {}       # name -> bmesh
-		vgroupsObj = {}    # name -> {group_name: [vertex indices]}
-		building_categories = set()  # category names that contain at least one building feature
-		_bm_has_height_layer = set()  # objNames whose dest_bm already has 'height' float layer
+		# --- Doppelklick-Guard + thread start ------------------------------------
+		global _geojson_thread, _geojson_result, _geojson_context_args
+		with _geojson_state_lock:
+			if _geojson_thread is not None and _geojson_thread.is_alive():
+				self.report({'INFO'}, "GeoJSON import already running, please wait...")
+				return {'CANCELLED'}
 
-		# Collection for separate mode
-		layer = None
-		if self.separate:
-			layer = bpy.data.collections.new('GeoJSON')
-			scn.collection.children.link(layer)
+			_geojson_result = {'ok': None, 'error': None}
+			_geojson_context_args = {
+				'filepath': self.filepath,
+				'scene_name': scene_name,
+				'buildingsExtrusion': self.buildingsExtrusion,
+				'separate': self.separate,
+			}
 
-		feat_count = 0
-		skip_count = 0
+			_geojson_thread = threading.Thread(
+				target=_geojson_parse_thread,
+				args=(
+					self.filepath, dx, dy, dstCRS,
+					self.buildingsExtrusion, self.defaultHeight, self.levelHeight,
+					self.separate, _geojson_result,
+				),
+				daemon=True,
+			)
+			_geojson_thread.start()
 
-		for geom, props in _iter_geometries(geojson):
-			gtype = geom.get("type", "")
-			coords = geom.get("coordinates")
-			if coords is None:
-				skip_count += 1
-				continue
+		self.report({'INFO'}, "Parsing GeoJSON in background, please wait...")
 
-			feat_count += 1
-			feat_name = props.get("name") or props.get("Name") or props.get("NAME") or str(feat_count)
+		# --- Phase C polling callback (main thread) -------------------------------
+		def _poll_geojson_thread():
+			global _geojson_thread, _geojson_result, _geojson_context_args
 
-			# ----- Point --------------------------------------------------------
-			if gtype == "Point":
-				cat = "Points"
-				pts_raw = [coords[:2]]  # [[lon, lat]]
+			with _geojson_state_lock:
+				if _geojson_thread is None or _geojson_thread.is_alive():
+					return 0.5  # poll again in 0.5 s
 
-			# ----- LineString ---------------------------------------------------
-			elif gtype == "LineString":
-				cat = "Lines"
-				if len(coords) < 2:
-					skip_count += 1
-					continue
-				pts_raw = [c[:2] for c in coords]
+				# Thread finished — consume state under lock
+				_geojson_thread = None
+				result = _geojson_result
+				ctx_args = _geojson_context_args
+				_geojson_result = None
+				_geojson_context_args = None
 
-			# ----- Polygon ------------------------------------------------------
-			elif gtype == "Polygon":
-				cat = "Polygons"
-				ring = coords[0] if coords else []
-				if len(ring) < 3:
-					skip_count += 1
-					continue
-				# GeoJSON polygons have the first coord repeated as last – drop it
-				if ring[0] == ring[-1]:
-					ring = ring[:-1]
-				if len(ring) < 3:
-					skip_count += 1
-					continue
-				pts_raw = [c[:2] for c in ring]
+			# --- Error path -------------------------------------------------------
+			def _reset_cursor():
+				try:
+					bpy.context.window.cursor_set('DEFAULT')
+				except Exception:
+					pass
 
-			else:
-				skip_count += 1
-				continue
+			if not result or not result.get('ok'):
+				err = result.get('error', 'Unknown error') if result else 'No result'
+				log.error("GeoJSON import background error: %s", err)
+				_reset_cursor()
+				return None  # stop timer
 
-			# Reproject  (lon/lat tuples)
+			# --- Success: build Blender objects (Phase C) -------------------------
+			parsed = result['parsed']
+			feat_count = parsed['feat_count']
+			skip_count = parsed['skip_count']
+			separate = parsed['separate']
+			buildingsExtrusion = ctx_args['buildingsExtrusion']
+
+			scn = bpy.data.scenes.get(ctx_args['scene_name'])
+			if scn is None:
+				log.error("Scene '%s' no longer exists", ctx_args['scene_name'])
+				_reset_cursor()
+				return None
+
 			try:
-				pts_prj = rprj.pts(pts_raw)
+				if separate:
+					_build_separate(scn, parsed, buildingsExtrusion)
+				else:
+					_build_merged(scn, parsed, buildingsExtrusion)
+
+				bbox = getBBOX.fromScn(scn)
+				adjust3Dview(bpy.context, bbox)
+
+				msg = "Imported {} feature(s)".format(feat_count)
+				if skip_count:
+					msg += " ({} skipped)".format(skip_count)
+				log.info(msg)
+				# INFO reports via operator self are unavailable in a timer callback;
+				# write to the log and print so the user sees it in the system console.
+				print("[cartoblend] " + msg)
+
 			except Exception:
-				log.warning("Reprojection failed for feature %s", feat_name, exc_info=True)
-				skip_count += 1
+				log.error("GeoJSON Phase C (mesh build) failed", exc_info=True)
+			finally:
+				_reset_cursor()
+
+			return None  # stop timer
+
+		bpy.app.timers.register(_poll_geojson_thread, first_interval=0.5)
+
+		return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
+# Phase C helpers — called from main thread only
+# ---------------------------------------------------------------------------
+
+def _build_separate(scn, parsed, buildingsExtrusion):
+	"""Create one Blender object per feature (separate=True path)."""
+	layer = bpy.data.collections.new('GeoJSON')
+	scn.collection.children.link(layer)
+
+	for feat in parsed['features_separate']:
+		cat = feat['cat']
+		feat_name = feat['feat_name']
+		gtype = feat['gtype']
+		pts_3d = feat['pts_3d']
+		is_building = feat['is_building']
+		height_val = feat['height_val']
+		props = feat['props']
+
+		bm = bmesh.new()
+		height_layer = None
+		if is_building:
+			height_layer = bm.faces.layers.float.new('height')
+
+		_fill_bmesh(bm, gtype, pts_3d, is_building, height_val, height_layer)
+
+		mesh = bpy.data.meshes.new(feat_name)
+		bm.to_mesh(mesh)
+		bm.free()
+		mesh.update()
+
+		obj = bpy.data.objects.new(feat_name, mesh)
+
+		if is_building and buildingsExtrusion:
+			_apply_building_geonodes(obj)
+
+		# Store properties as custom props
+		for k, v in props.items():
+			if isinstance(v, (dict, list, tuple)):
 				continue
+			try:
+				if isinstance(v, str) and len(v) > 1024:
+					v = v[:1024]
+				obj[k] = v
+			except Exception:
+				obj[k] = str(v)[:1024]
 
-			# Shift to scene origin
-			pts_3d = [(p[0] - dx, p[1] - dy, 0.0) for p in pts_prj]
+		# Link into collection, organised by category
+		try:
+			cat_col = layer.children[cat]
+		except KeyError:
+			cat_col = bpy.data.collections.new(cat)
+			layer.children.link(cat_col)
+		cat_col.objects.link(obj)
+		obj.select_set(True)
 
-			# --- Build bmesh for this feature -----------------------------------
+
+def _build_merged(scn, parsed, buildingsExtrusion):
+	"""Merge all features per category into a single object (separate=False path)."""
+	bmeshes = {}              # cat -> bmesh
+	vgroupsObj = {}           # cat -> {group_name: [vertex indices]}
+	building_categories = set()
+	_bm_has_height_layer = set()
+
+	for cat, feats in parsed['features_merged'].items():
+		for feat in feats:
+			gtype = feat['gtype']
+			pts_3d = feat['pts_3d']
+			is_building = feat['is_building']
+			height_val = feat['height_val']
+			props = feat['props']
+
+			# Per-feature bmesh (temporary)
 			bm = bmesh.new()
-
-			is_polygon = (gtype == "Polygon")
-			is_building = False
-			height_val = None
-
-			if is_polygon and self.buildingsExtrusion:
-				height_val = _get_height_from_props(props, self.defaultHeight, self.levelHeight)
-				if height_val is not None:
-					is_building = True
-
-			# Pre-create attribute layers
+			height_layer = None
 			if is_building:
 				height_layer = bm.faces.layers.float.new('height')
 
-			if gtype == "Point":
-				for pt in pts_3d:
-					bm.verts.new(pt)
+			degenerate = _fill_bmesh(bm, gtype, pts_3d, is_building, height_val, height_layer)
+			if degenerate:
+				bm.free()
+				continue
 
-			elif gtype == "LineString":
-				verts = [bm.verts.new(pt) for pt in pts_3d]
-				for i in range(len(verts) - 1):
-					bm.edges.new([verts[i], verts[i + 1]])
-
-			elif gtype == "Polygon":
-				verts = [bm.verts.new(pt) for pt in pts_3d]
-				try:
-					face = bm.faces.new(verts)
-				except ValueError:
-					# Degenerate polygon (e.g. duplicate verts)
-					log.warning("Degenerate polygon for feature %s – skipped face creation", feat_name)
-					bm.free()
-					skip_count += 1
-					continue
-
-				face.normal_update()
-				if face.normal.z < 0:
-					face.normal_flip()
-
-				if is_building and height_val is not None:
-					face[height_layer] = float(height_val)
-
-			# --- Separate mode: create object immediately -----------------------
-			if self.separate:
-				obj_name = feat_name
-				mesh = bpy.data.meshes.new(obj_name)
-				bm.to_mesh(mesh)
-				mesh.update()
-
-				obj = bpy.data.objects.new(obj_name, mesh)
-
-				# Building GN
+			# Get or create destination bmesh for this category
+			dest_bm = bmeshes.get(cat)
+			if dest_bm is None:
+				dest_bm = bmesh.new()
 				if is_building:
-					_apply_building_geonodes(obj)
-
-				# Store properties as custom props. Drop nested structures and cap
-				# strings so a verbose 'description' doesn't bloat the .blend file.
-				for k, v in props.items():
-					if isinstance(v, (dict, list, tuple)):
-						# Skipping nested values keeps custom props flat and avoids
-						# huge JSON blobs being serialised into the scene.
-						continue
-					try:
-						if isinstance(v, str) and len(v) > 1024:
-							v = v[:1024]
-						obj[k] = v
-					except Exception:
-						obj[k] = str(v)[:1024]
-
-				# Link into collection, organised by category
-				try:
-					cat_col = layer.children[cat]
-				except KeyError:
-					cat_col = bpy.data.collections.new(cat)
-					layer.children.link(cat_col)
-				cat_col.objects.link(obj)
-				obj.select_set(True)
-
-			# --- Merged mode: accumulate into per-category bmeshes ---------------
-			else:
-				objName = cat
-				dest_bm = bmeshes.get(objName)
-				if dest_bm is None:
-					dest_bm = bmesh.new()
-					# Pre-create layers on dest so they survive joins
-					if is_building:
-						dest_bm.faces.layers.float.new('height')
-						_bm_has_height_layer.add(objName)
-					bmeshes[objName] = dest_bm
-
-				# Ensure 'height' layer exists on dest even if first features weren't buildings
-				if is_building and objName not in _bm_has_height_layer:
 					dest_bm.faces.layers.float.new('height')
-					_bm_has_height_layer.add(objName)
-				if is_building:
-					building_categories.add(objName)
+					_bm_has_height_layer.add(cat)
+				bmeshes[cat] = dest_bm
 
-				bm.verts.index_update()
-				offset = len(dest_bm.verts)
-				_joinBmesh(bm, dest_bm)
+			# Ensure 'height' layer exists if we encounter buildings later
+			if is_building and cat not in _bm_has_height_layer:
+				dest_bm.faces.layers.float.new('height')
+				_bm_has_height_layer.add(cat)
+			if is_building:
+				building_categories.add(cat)
 
-				# Vertex groups for properties
-				vgroups = vgroupsObj.setdefault(objName, {})
-				vidx = list(range(offset, offset + len(bm.verts)))
+			bm.verts.index_update()
+			offset = len(dest_bm.verts)
+			_joinBmesh(bm, dest_bm)
 
-				feat_label = props.get("name") or props.get("Name") or props.get("NAME")
-				if feat_label:
-					vg = vgroups.setdefault("Name:" + str(feat_label), [])
+			# Vertex groups for properties
+			vgroups = vgroupsObj.setdefault(cat, {})
+			vidx = list(range(offset, offset + len(bm.verts)))
+
+			feat_label = props.get("name") or props.get("Name") or props.get("NAME")
+			if feat_label:
+				vg = vgroups.setdefault("Name:" + str(feat_label), [])
+				vg.extend(vidx)
+
+			for tag_key in ("type", "class", "category", "landuse", "building"):
+				tag_val = props.get(tag_key)
+				if tag_val:
+					vg = vgroups.setdefault("Tag:" + tag_key + "=" + str(tag_val), [])
 					vg.extend(vidx)
-
-				# Group by a few common classification keys
-				for tag_key in ("type", "class", "category", "landuse", "building"):
-					tag_val = props.get(tag_key)
-					if tag_val:
-						vg = vgroups.setdefault("Tag:" + tag_key + "=" + str(tag_val), [])
-						vg.extend(vidx)
 
 			bm.free()
 
-		# --- Finalise merged bmeshes -------------------------------------------
-		if not self.separate:
-			for name, bm in bmeshes.items():
-				bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
-				mesh = bpy.data.meshes.new(name)
-				bm.to_mesh(mesh)
-				bm.free()
-				mesh.update()
+	# Finalise merged bmeshes
+	for name, bm in bmeshes.items():
+		bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
+		mesh = bpy.data.meshes.new(name)
+		bm.to_mesh(mesh)
+		bm.free()
+		mesh.update()
 
-				obj = bpy.data.objects.new(name, mesh)
-				scn.collection.objects.link(obj)
-				obj.select_set(True)
+		obj = bpy.data.objects.new(name, mesh)
+		scn.collection.objects.link(obj)
+		obj.select_set(True)
 
-				# Building GN only on categories that actually contained building features.
-				# Just probing for the height attribute is not enough — a single building
-				# feature would have the layer present on the entire merged mesh and we'd
-				# extrude unrelated polygons (parks, water, …) along with it.
-				if (self.buildingsExtrusion
-						and name in building_categories
-						and 'height' in [attr.name for attr in mesh.attributes]):
-					_apply_building_geonodes(obj)
+		if (buildingsExtrusion
+				and name in building_categories
+				and 'height' in [attr.name for attr in mesh.attributes]):
+			_apply_building_geonodes(obj)
 
-				# Vertex groups
-				vgroups = vgroupsObj.get(name)
-				if vgroups:
-					for vgName in sorted(vgroups.keys()):
-						vgIdx = vgroups[vgName]
-						g = obj.vertex_groups.new(name=vgName)
-						g.add(vgIdx, weight=1, type='ADD')
+		vgroups = vgroupsObj.get(name)
+		if vgroups:
+			for vgName in sorted(vgroups.keys()):
+				vgIdx = vgroups[vgName]
+				g = obj.vertex_groups.new(name=vgName)
+				g.add(vgIdx, weight=1, type='ADD')
 
-		# --- Finish ---------------------------------------------------------------
-		if feat_count == 0:
-			self.report({'WARNING'}, "No geometry found in GeoJSON file")
-			return {'CANCELLED'}
 
-		bbox = getBBOX.fromScn(scn)
-		adjust3Dview(context, bbox)
+def _fill_bmesh(bm, gtype, pts_3d, is_building, height_val, height_layer):
+	"""Fill *bm* with geometry for one feature.
 
-		msg = "Imported {} feature(s)".format(feat_count)
-		if skip_count:
-			msg += " ({} skipped)".format(skip_count)
-		self.report({'INFO'}, msg)
-		log.info(msg)
+	Returns True if the feature was degenerate and should be skipped, else False.
+	"""
+	if gtype == "Point":
+		for pt in pts_3d:
+			bm.verts.new(pt)
 
-		return {'FINISHED'}
+	elif gtype == "LineString":
+		verts = [bm.verts.new(pt) for pt in pts_3d]
+		for i in range(len(verts) - 1):
+			bm.edges.new([verts[i], verts[i + 1]])
+
+	elif gtype == "Polygon":
+		verts = [bm.verts.new(pt) for pt in pts_3d]
+		try:
+			face = bm.faces.new(verts)
+		except ValueError:
+			log.warning("Degenerate polygon – skipped face creation")
+			return True  # degenerate
+
+		face.normal_update()
+		if face.normal.z < 0:
+			face.normal_flip()
+
+		if is_building and height_val is not None and height_layer is not None:
+			face[height_layer] = float(height_val)
+
+	return False  # ok
 
 
 # ---------------------------------------------------------------------------

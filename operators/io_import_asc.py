@@ -3,6 +3,7 @@
 import re
 import os
 import string
+import threading
 import bpy
 import math
 import numpy as np
@@ -24,6 +25,93 @@ from .utils import placeObj, adjust3Dview, showTextures, addTexture, getBBOX
 from .utils import rasterExtentToMesh, geoRastUVmap, setDisplacer
 
 PKG = __package__.rsplit('.', maxsplit=1)[0]  # bl_ext.user_default.cartoblend
+
+
+# ---------------------------------------------------------------------------
+# Module-level state for background ASC parse/reproject thread
+# ---------------------------------------------------------------------------
+_asc_state_lock = threading.Lock()
+_asc_thread = None
+_asc_result = None   # dict with keys: 'vertices', 'faces', 'reprojection_to', 'name', 'error'
+_asc_args = None     # tuple of context-derived values needed in the poll callback
+
+
+def _asc_worker(filename, nrows, ncols, cellsize, nodata, step, offset,
+                reprojection_from, rprj, rprjToScene, import_mode, result):
+    """
+    Background thread: Phase A (np.loadtxt) + Phase B (reproject).
+    Writes vertices/faces into *result*. No bpy calls allowed here.
+    """
+    try:
+        # --- Phase A: parse data matrix ---
+        with open(filename, 'r', encoding='utf-8') as f:
+            # Skip the 6-line header that was already parsed in execute()
+            for _ in range(6):
+                f.readline()
+            arr = np.loadtxt(f, dtype=np.float32)
+
+        if arr.shape != (nrows, ncols):
+            raise ValueError(
+                'Data shape {} does not match header ({}, {})'.format(arr.shape, nrows, ncols))
+
+        # Flip so row 0 = south; then decimate
+        arr = arr[::-1, :]
+        arr = arr[::step, ::step]
+
+        sub_nrows, sub_ncols = arr.shape
+
+        # Build coordinate grids in source CRS
+        col_idx = np.arange(sub_ncols, dtype=np.float32) * (cellsize * step) + offset.x
+        row_idx = np.arange(sub_nrows, dtype=np.float32) * (cellsize * step) + offset.y
+        xs, ys = np.meshgrid(col_idx, row_idx)  # (sub_nrows, sub_ncols)
+
+        # --- Phase B: reproject ---
+        if rprj:
+            src_xs = xs.ravel() + reprojection_from.x
+            src_ys = ys.ravel() + reprojection_from.y
+            reproj_pts = rprjToScene.pts(list(zip(src_xs.tolist(), src_ys.tolist())))
+            reproj_arr = np.array(reproj_pts, dtype=np.float32)
+            xs_out = reproj_arr[:, 0] - result['reprojection_to_x']
+            ys_out = reproj_arr[:, 1] - result['reprojection_to_y']
+        else:
+            xs_out = xs.ravel()
+            ys_out = ys.ravel()
+
+        zs = arr.ravel()
+
+        if import_mode == 'CLOUD':
+            mask = zs != nodata
+            xs_out = xs_out[mask]
+            ys_out = ys_out[mask]
+            zs = zs[mask]
+        else:
+            zs = np.where(zs == nodata, np.float32(0.0), zs)
+
+        vertices = list(zip(xs_out.tolist(), ys_out.tolist(), zs.tolist()))
+
+        faces = []
+        if import_mode == 'MESH':
+            index = 0
+            for r in range(sub_nrows - 1):
+                for c in range(sub_ncols - 1):
+                    v1 = index
+                    v2 = v1 + sub_ncols
+                    v3 = v2 + 1
+                    v4 = v1 + 1
+                    faces.append((v1, v2, v3, v4))
+                    index += 1
+                index += 1
+
+        with _asc_state_lock:
+            result['vertices'] = vertices
+            result['faces'] = faces
+            result['ok'] = True
+
+    except Exception as exc:
+        log.error('ASC background worker failed', exc_info=True)
+        with _asc_state_lock:
+            result['ok'] = False
+            result['error'] = str(exc)
 
 
 class IMPORTGIS_OT_ascii_grid(Operator, ImportHelper):
@@ -151,6 +239,8 @@ class IMPORTGIS_OT_ascii_grid(Operator, ImportHelper):
         return context.mode == 'OBJECT'
 
     def execute(self, context):
+        global _asc_thread, _asc_result, _asc_args
+
         prefs = context.preferences.addons[PKG].preferences
         bpy.ops.object.select_all(action='DESELECT')
         #Get scene and some georef data
@@ -186,6 +276,7 @@ class IMPORTGIS_OT_ascii_grid(Operator, ImportHelper):
         name = os.path.splitext(os.path.basename(filename))[0]
         log.info('Importing {}...'.format(filename))
 
+        # --- Parse 6-line header (fast, stays in main thread) ---
         with open(filename, 'r', encoding='utf-8') as f:
             meta_re = re.compile(r'^([^\s]+)\s+([^\s]+)$')  # 'abc  123'
             meta = {}
@@ -194,140 +285,143 @@ class IMPORTGIS_OT_ascii_grid(Operator, ImportHelper):
                 m = meta_re.match(line)
                 if m:
                     meta[m.group(1).lower()] = m.group(2)
-            log.debug(meta)
+        log.debug(meta)
 
-            # step allows reduction during import, only taking every Nth point
-            step = self.step
-            try:
-                nrows = int(meta['nrows'])
-                ncols = int(meta['ncols'])
-                cellsize = float(meta['cellsize'])
-            except KeyError as e:
-                log.error("Missing required header key: %s", e)
-                self.report({'ERROR'}, "Missing required ASC header key: {}".format(e))
-                return {'CANCELLED'}
-            # NODATA_value is optional per ESRI spec; fall back to the conventional
-            # sentinel so a header without the line still imports cleanly.
-            try:
-                nodata = float(meta.get('nodata_value', -9999))
-            except (TypeError, ValueError):
-                nodata = -9999.0
+        step = self.step
+        try:
+            nrows = int(meta['nrows'])
+            ncols = int(meta['ncols'])
+            cellsize = float(meta['cellsize'])
+        except KeyError as e:
+            log.error("Missing required header key: %s", e)
+            self.report({'ERROR'}, "Missing required ASC header key: {}".format(e))
+            return {'CANCELLED'}
+        try:
+            nodata = float(meta.get('nodata_value', -9999))
+        except (TypeError, ValueError):
+            nodata = -9999.0
 
-            # options are lower left cell corner, or lower left cell centre
-            reprojection = {}
-            offset = XY(0, 0)
-            if 'xllcorner' in meta:
-                llcorner = XY(float(meta['xllcorner']), float(meta['yllcorner']))
-                reprojection['from'] = llcorner
-            elif 'xllcenter' in meta:
-                centre = XY(float(meta['xllcenter']), float(meta['yllcenter']))
-                offset = XY(-cellsize / 2, -cellsize / 2)
-                reprojection['from'] = centre
-            else:
-                log.error("ASC file missing xllcorner/xllcenter header")
-                self.report({'ERROR'}, "ASC file is missing xllcorner or xllcenter header")
-                return {'CANCELLED'}
+        reprojection = {}
+        offset = XY(0, 0)
+        if 'xllcorner' in meta:
+            llcorner = XY(float(meta['xllcorner']), float(meta['yllcorner']))
+            reprojection['from'] = llcorner
+        elif 'xllcenter' in meta:
+            centre = XY(float(meta['xllcenter']), float(meta['yllcenter']))
+            offset = XY(-cellsize / 2, -cellsize / 2)
+            reprojection['from'] = centre
+        else:
+            log.error("ASC file missing xllcorner/xllcenter header")
+            self.report({'ERROR'}, "ASC file is missing xllcorner or xllcenter header")
+            return {'CANCELLED'}
 
-            # now set the correct offset for the mesh
+        if rprj:
+            reprojection['to'] = XY(*rprjToScene.pt(*reprojection['from']))
+            log.debug('{name} reprojected from {from} to {to}'.format(**reprojection, name=name))
+        else:
+            reprojection['to'] = reprojection['from']
+
+        if not geoscn.isGeoref:
+            centre = (reprojection['from'].x + offset.x + ((ncols / 2) * cellsize),
+                      reprojection['from'].y + offset.y + ((nrows / 2) * cellsize))
             if rprj:
-                reprojection['to'] = XY(*rprjToScene.pt(*reprojection['from']))
-                log.debug('{name} reprojected from {from} to {to}'.format(**reprojection, name=name))
-            else:
-                reprojection['to'] = reprojection['from']
+                centre = rprjToScene.pt(*centre)
+            geoscn.setOriginPrj(*centre)
+            dx, dy = geoscn.getOriginPrj()
 
-            if not geoscn.isGeoref:
-                # use the centre of the imported grid as scene origin (calculate only if grid file specified llcorner)
-                centre = (reprojection['from'].x + offset.x + ((ncols / 2) * cellsize),
-                          reprojection['from'].y + offset.y + ((nrows / 2) * cellsize))
-                if rprj:
-                    centre = rprjToScene.pt(*centre)
-                geoscn.setOriginPrj(*centre)
-                dx, dy = geoscn.getOriginPrj()
+        # Doppelklick-Guard: don't start a second thread while one is running
+        with _asc_state_lock:
+            if _asc_thread is not None and _asc_thread.is_alive():
+                self.report({'INFO'}, "Import already running, please wait...")
+                return {'CANCELLED'}
 
-            # --- numpy-basierter Datenlader (ersetzt den doppelten for-Loop) ---
-            # Lese die gesamte Daten-Matrix auf einmal; Header wurde bereits oben gelesen,
-            # daher skiprows=0 (Datei-Cursor steht schon auf den Daten).
+            # Initialise shared result dict; reprojection_to_x/y are needed inside worker
+            _asc_result = {
+                'ok': None,
+                'error': None,
+                'vertices': None,
+                'faces': None,
+                'reprojection_to_x': reprojection['to'].x,
+                'reprojection_to_y': reprojection['to'].y,
+            }
+            _asc_args = {
+                'name': name,
+                'dx': dx,
+                'dy': dy,
+                'reprojection_to': reprojection['to'],
+                'adjust3Dview': prefs.adjust3Dview,
+            }
+            _asc_thread = threading.Thread(
+                target=_asc_worker,
+                args=(
+                    filename, nrows, ncols, cellsize, nodata, step, offset,
+                    reprojection['from'], rprj, rprjToScene,
+                    self.importMode, _asc_result,
+                ),
+                daemon=True,
+            )
+            _asc_thread.start()
+
+        self.report({'INFO'}, "Importing ASC grid in background, please wait...")
+
+        # --- Timer: Phase C runs in main thread once worker is done ---
+        def _poll_asc_thread():
+            global _asc_thread, _asc_result, _asc_args
+
+            with _asc_state_lock:
+                if _asc_thread is None or _asc_thread.is_alive():
+                    return 0.5  # poll again
+                # Thread finished — consume state under lock
+                _asc_thread = None
+                result = _asc_result
+                args = _asc_args
+                _asc_result = None
+                _asc_args = None
+
+            if not result or not result.get('ok'):
+                err = result.get('error', 'Unknown error') if result else 'No result'
+                log.error('ASC import failed: %s', err)
+                try:
+                    bpy.context.window.cursor_set('DEFAULT')
+                except Exception:
+                    pass
+                return None  # stop timer
+
+            # --- Phase C: build mesh in main thread ---
             try:
-                arr = np.loadtxt(f, dtype=np.float32)
-            except ValueError as e:
-                log.error("Cannot parse ASC data as float array: %s", e)
-                self.report({'ERROR'}, 'Cannot parse ASC grid data: {}'.format(e))
-                return {'CANCELLED'}
+                name = args['name']
+                dx = args['dx']
+                dy = args['dy']
+                reprojection_to = args['reprojection_to']
 
-            if arr.shape != (nrows, ncols):
-                log.error('Data shape %s does not match header (%d, %d)', arr.shape, nrows, ncols)
-                self.report({'ERROR'}, 'ASC data shape does not match header dimensions')
-                return {'CANCELLED'}
+                me = bpy.data.meshes.new(name)
+                ob = bpy.data.objects.new(name, me)
+                ob.location = (reprojection_to.x - dx, reprojection_to.y - dy, 0)
 
-            # Dezimierung via numpy-Slicing: ASC-Zeile 0 ist der nördlichste Streifen
-            # (höchster y-Wert), daher Zeilen umkehren und dann sampeln.
-            arr = arr[::-1, :]          # flip: Zeile 0 = Süden
-            arr = arr[::step, ::step]   # Dezimierung
+                scn = bpy.context.scene
+                scn.collection.objects.link(ob)
+                bpy.context.view_layer.objects.active = ob
+                ob.select_set(True)
 
-            sub_nrows, sub_ncols = arr.shape
+                me.from_pydata(result['vertices'], [], result['faces'])
+                me.update()
 
-            # Koordinatengitter (in Quell-CRS, Einheit: cellsize-Einheiten)
-            col_idx = np.arange(sub_ncols, dtype=np.float32) * (cellsize * step) + offset.x
-            row_idx = np.arange(sub_nrows, dtype=np.float32) * (cellsize * step) + offset.y
-            xs, ys = np.meshgrid(col_idx, row_idx)  # (sub_nrows, sub_ncols)
+                if args['adjust3Dview']:
+                    bb = getBBOX.fromObj(ob)
+                    adjust3Dview(bpy.context, bb)
 
-            if rprj:
-                # Vektorisierte Reprojektion aller Punkte auf einmal
-                src_xs = xs.ravel() + reprojection['from'].x
-                src_ys = ys.ravel() + reprojection['from'].y
-                reproj_pts = rprjToScene.pts(list(zip(src_xs.tolist(), src_ys.tolist())))
-                reproj_arr = np.array(reproj_pts, dtype=np.float32)
-                xs_out = reproj_arr[:, 0] - reprojection['to'].x
-                ys_out = reproj_arr[:, 1] - reprojection['to'].y
-            else:
-                xs_out = xs.ravel()
-                ys_out = ys.ravel()
+                log.info('ASC import finished: %s', name)
+            except Exception:
+                log.error('ASC mesh build failed', exc_info=True)
+            finally:
+                try:
+                    bpy.context.window.cursor_set('DEFAULT')
+                except Exception:
+                    pass
 
-            zs = arr.ravel()
+            return None  # stop timer
 
-            if self.importMode == 'CLOUD':
-                # Punkt-Wolke: NoData-Punkte komplett verwerfen
-                mask = zs != nodata
-                xs_out = xs_out[mask]
-                ys_out = ys_out[mask]
-                zs = zs[mask]
-            else:
-                # Mesh: NoData durch 0.0 ersetzen, Topologie bleibt intakt
-                zs = np.where(zs == nodata, np.float32(0.0), zs)
-
-            vertices = list(zip(xs_out.tolist(), ys_out.tolist(), zs.tolist()))
-            index = 0
-            faces = []
-
-        if self.importMode == 'MESH':
-            # sub_ncols/sub_nrows wurden durch numpy-Slicing bereits korrekt berechnet
-            for r in range(0, sub_nrows - 1):
-                for c in range(0, sub_ncols - 1):
-                    v1 = index
-                    v2 = v1 + sub_ncols
-                    v3 = v2 + 1
-                    v4 = v1 + 1
-                    faces.append((v1, v2, v3, v4))
-                    index += 1
-                index += 1
-
-        # Create mesh
-        me = bpy.data.meshes.new(name)
-        ob = bpy.data.objects.new(name, me)
-        ob.location = (reprojection['to'].x - dx, reprojection['to'].y - dy, 0)
-
-        # Link object to scene and make active
-        scn = bpy.context.scene
-        scn.collection.objects.link(ob)
-        bpy.context.view_layer.objects.active = ob
-        ob.select_set(True)
-
-        me.from_pydata(vertices, [], faces)
-        me.update()
-
-        if prefs.adjust3Dview:
-            bb = getBBOX.fromObj(ob)
-            adjust3Dview(context, bb)
+        bpy.app.timers.register(_poll_asc_thread, first_interval=0.5)
 
         return {'FINISHED'}
 

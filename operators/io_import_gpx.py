@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 import xml.etree.ElementTree as ET
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,16 @@ PKG = __package__.rsplit('.', maxsplit=1)[0]  # bl_ext.user_default.cartoblend
 # GPX XML namespace
 GPX_NS_10 = '{http://www.topografix.com/GPX/1/0}'
 GPX_NS_11 = '{http://www.topografix.com/GPX/1/1}'
+
+
+# ---------------------------------------------------------------------------
+# Module-level state for background GPX parse + reproject
+# ---------------------------------------------------------------------------
+
+_gpx_state_lock = threading.Lock()
+_gpx_thread = None
+_gpx_result = None        # dict: 'ok', 'error', 'gpx_data', 'prepared'
+_gpx_context_args = None  # tuple of (operator settings, scene state) for the timer
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +172,140 @@ def _zoom_for_bbox(min_lon, min_lat, max_lon, max_lat):
 	# zoom ≈ log2(360 / span) with some padding
 	zoom = int(math.log2(360.0 / span)) - 1
 	return max(0, min(zoom, 19))
+
+
+# ---------------------------------------------------------------------------
+# Worker thread: parse GPX + batch-reproject (NO bpy access in here!)
+# ---------------------------------------------------------------------------
+
+def _sniff_first_coord(filepath):
+	"""Quickly find the first lon/lat in a GPX file via streaming iterparse,
+	abort as soon as a coordinate is found. Used only for CRS bootstrap so we
+	avoid loading the whole document on the main thread.
+	Returns (lon, lat) or None.
+	"""
+	_reject_doctype(filepath)
+	# Use iterparse and break out at the first wpt/trkpt/rtept that yields
+	# valid lon/lat. For typical GPX files this completes in microseconds.
+	try:
+		for event, elem in ET.iterparse(filepath, events=('start',)):
+			tag = elem.tag
+			# Strip any namespace prefix
+			if '}' in tag:
+				localname = tag.split('}', 1)[1]
+			else:
+				localname = tag
+			if localname in ('wpt', 'trkpt', 'rtept'):
+				lat_s = elem.get('lat')
+				lon_s = elem.get('lon')
+				if lat_s is not None and lon_s is not None:
+					try:
+						return (float(lon_s), float(lat_s))
+					except ValueError:
+						continue
+	except ET.ParseError:
+		return None
+	return None
+
+
+def _gpx_worker(filepath, src_crs, dst_crs, dx, dy, use_elevation, result_holder):
+	"""Run in background thread.
+
+	Phase A (parse XML) + Phase B (batch-reproject) — produces a flat 3D-point
+	data structure ready to be turned into curves/objects on the main thread.
+
+	IMPORTANT: This function must not touch bpy. The Reproj instance is created
+	fresh inside the thread to avoid sharing state with the main thread.
+	"""
+	try:
+		# --- Phase A: Parse XML ---
+		gpx_data = _parse_gpx(filepath)
+
+		# --- Phase B: Batch-reproject ---
+		# Build a single flat list of (lon, lat) tuples for all points across
+		# tracks, routes and waypoints. Slice the result back into per-segment
+		# 3D point lists.
+		try:
+			rprj = Reproj(src_crs, dst_crs)
+		except Exception as e:
+			with _gpx_state_lock:
+				result_holder['ok'] = False
+				result_holder['error'] = "Unable to initialise reprojection: {}".format(e)
+			return
+
+		all_lonlat = []
+		# layout markers: list of (kind, meta, start, end) where kind is
+		#   'track' → meta = (trk_name, seg_idx)
+		#   'route' → meta = rte_name
+		#   'waypoint' → meta = (ele, name)
+		layout = []
+
+		# Tracks: only segments with >= 2 points
+		for trk_idx, trk in enumerate(gpx_data['tracks']):
+			trk_name = trk['name'] or "Track {}".format(trk_idx + 1)
+			for seg_idx, seg_pts in enumerate(trk['segments']):
+				if len(seg_pts) < 2:
+					continue
+				start = len(all_lonlat)
+				all_lonlat.extend((p[0], p[1]) for p in seg_pts)
+				layout.append(('track', (trk_name, seg_idx, seg_pts), start, len(all_lonlat)))
+
+		# Routes: only with >= 2 points
+		for rte_idx, rte in enumerate(gpx_data['routes']):
+			rte_name = rte['name'] or "Route {}".format(rte_idx + 1)
+			pts = rte['points']
+			if len(pts) < 2:
+				continue
+			start = len(all_lonlat)
+			all_lonlat.extend((p[0], p[1]) for p in pts)
+			layout.append(('route', (rte_name, pts), start, len(all_lonlat)))
+
+		# Waypoints
+		for w_idx, w in enumerate(gpx_data['waypoints']):
+			start = len(all_lonlat)
+			all_lonlat.append((w[0], w[1]))
+			layout.append(('waypoint', (w_idx, w[2], w[3]), start, len(all_lonlat)))
+
+		all_prj = rprj.pts(all_lonlat) if all_lonlat else []
+
+		# Build prepared 3D structures (origin-shifted)
+		prepared = {'tracks': [], 'routes': [], 'waypoints': []}
+		# tracks: list of (trk_name, seg_idx, pts_3d)
+		# routes: list of (rte_name, pts_3d)
+		# waypoints: list of (idx, x, y, z, name)
+
+		for kind, meta, s, e in layout:
+			prj_slice = all_prj[s:e]
+			if kind == 'track':
+				trk_name, seg_idx, seg_pts = meta
+				if use_elevation:
+					pts_3d = [(p[0] - dx, p[1] - dy, seg_pts[i][2]) for i, p in enumerate(prj_slice)]
+				else:
+					pts_3d = [(p[0] - dx, p[1] - dy, 0.0) for p in prj_slice]
+				prepared['tracks'].append((trk_name, seg_idx, pts_3d))
+			elif kind == 'route':
+				rte_name, pts = meta
+				if use_elevation:
+					pts_3d = [(p[0] - dx, p[1] - dy, pts[i][2]) for i, p in enumerate(prj_slice)]
+				else:
+					pts_3d = [(p[0] - dx, p[1] - dy, 0.0) for p in prj_slice]
+				prepared['routes'].append((rte_name, pts_3d))
+			elif kind == 'waypoint':
+				w_idx, ele, name = meta
+				p = prj_slice[0]
+				z = ele if use_elevation else 0.0
+				prepared['waypoints'].append((w_idx, p[0] - dx, p[1] - dy, z, name))
+
+		with _gpx_state_lock:
+			result_holder['ok'] = True
+			result_holder['gpx_data'] = gpx_data
+			result_holder['prepared'] = prepared
+
+	except Exception as e:
+		log.error("GPX worker failed", exc_info=True)
+		with _gpx_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -677,27 +822,13 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			pass
 		bpy.ops.object.select_all(action='DESELECT')
 
-		w = context.window
-		w.cursor_set('WAIT')
-
-		# --- Parse GPX ----------------------------------------------------------
-		try:
-			gpx_data = _parse_gpx(self.filepath)
-		except Exception as e:
-			log.error("Failed to parse GPX", exc_info=True)
-			self.report({'ERROR'}, "Failed to parse GPX: " + str(e))
-			return {'CANCELLED'}
-
-		n_tracks = len(gpx_data['tracks'])
-		n_routes = len(gpx_data['routes'])
-		n_wpts = len(gpx_data['waypoints'])
-		log.info("GPX: %d tracks, %d routes, %d waypoints", n_tracks, n_routes, n_wpts)
-
-		if n_tracks == 0 and n_routes == 0 and n_wpts == 0:
-			self.report({'WARNING'}, "GPX file contains no data")
-			return {'CANCELLED'}
-
 		# --- Scene CRS / origin -------------------------------------------------
+		# We need the first lon/lat to bootstrap CRS/origin BEFORE starting the
+		# worker (so the worker has a fixed dst_crs + origin shift to project
+		# against). We use a streaming sniff that aborts on the first valid
+		# coordinate instead of parsing the whole document — this stays fast
+		# even on huge GPX files (the full parse runs in the worker thread).
+
 		scn = context.scene
 		geoscn = GeoScene(scn)
 
@@ -705,14 +836,20 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
 			return {'CANCELLED'}
 
+		try:
+			first = _sniff_first_coord(self.filepath)
+		except Exception as e:
+			log.error("Failed to sniff GPX", exc_info=True)
+			self.report({'ERROR'}, "Failed to read GPX: " + str(e))
+			return {'CANCELLED'}
+
+		if first is None:
+			self.report({'WARNING'}, "GPX file contains no usable coordinates")
+			return {'CANCELLED'}
+
 		# Auto-set CRS from first coordinate
 		# Use EPSG:3857 (Web Mercator) instead of UTM to stay compatible with
 		# basemap tiles — avoids the need for GDAL raster reprojection.
-		first = _first_coord_gpx(gpx_data)
-		if first is None:
-			self.report({'ERROR'}, "GPX contains no usable coordinates")
-			return {'CANCELLED'}
-
 		if not geoscn.hasCRS:
 			geoscn.crs = 'EPSG:3857'
 			log.info("Auto-set scene CRS to EPSG:3857 (Web Mercator)")
@@ -723,292 +860,331 @@ class IMPORTGIS_OT_gpx_file(Operator):
 			geoscn.setOriginPrj(x, y)
 
 		dstCRS = geoscn.crs
-
-		# Init reprojector (EPSG:4326 -> scene CRS)
-		try:
-			rprj = Reproj(4326, dstCRS)
-		except Exception:
-			log.error("Unable to initialise reprojection", exc_info=True)
-			self.report({'ERROR'}, "Unable to reproject data – check logs")
-			return {'CANCELLED'}
-
 		dx, dy = geoscn.crsx, geoscn.crsy
 
-		# --- Collection ---------------------------------------------------------
-		gpx_name = os.path.splitext(os.path.basename(self.filepath))[0]
-		collection = bpy.data.collections.new(gpx_name)
-		scn.collection.children.link(collection)
+		# --- Start background worker -------------------------------------------
+		global _gpx_thread, _gpx_result, _gpx_context_args
+		with _gpx_state_lock:
+			if _gpx_thread is not None and _gpx_thread.is_alive():
+				self.report({'INFO'}, "GPX import already running, please wait...")
+				return {'CANCELLED'}
+			_gpx_result = {'ok': None, 'error': None}
+			# Snapshot all operator settings so the timer callback (which runs
+			# after this operator instance is gone) can still see them.
+			_gpx_context_args = {
+				'filepath': self.filepath,
+				'importTracks': self.importTracks,
+				'importRoutes': self.importRoutes,
+				'importWaypoints': self.importWaypoints,
+				'useElevation': self.useElevation,
+				'separate': self.separate,
+				'routeProfile': self.routeProfile,
+				'routeWidth': self.routeWidth,
+				'curveResolution': self.curveResolution,
+				'snapToTerrain': self.snapToTerrain,
+				'autoBasemap': self.autoBasemap,
+				'dstCRS': dstCRS,
+				'dx': dx,
+				'dy': dy,
+			}
+			_gpx_thread = threading.Thread(
+				target=_gpx_worker,
+				args=(self.filepath, 4326, dstCRS, dx, dy, self.useElevation, _gpx_result),
+				daemon=True,
+			)
+			_gpx_thread.start()
 
-		created_objects = []
+		# Set cursor to wait
+		w = context.window
+		w.cursor_set('WAIT')
 
-		# --- Profile enum → int -------------------------------------------------
-		profile_int = 1 if self.routeProfile == 'TUBE' else 0
+		self.report({'INFO'}, "Parsing GPX in background, please wait...")
 
-		# --- Find terrain mesh for snap -----------------------------------------
-		terrain_obj = None
-		if self.snapToTerrain:
-			for obj in scn.objects:
-				if obj.type == 'MESH' and obj.name.startswith('EXPORT_'):
-					terrain_obj = obj
-					break
-			if terrain_obj is None:
-				for obj in scn.objects:
-					if obj.type == 'MESH' and any(k in obj.name.lower() for k in ('terrain', 'dem', 'srtm', 'elevation')):
-						terrain_obj = obj
-						break
-			if terrain_obj:
-				log.info("Will snap GPX to terrain: %s", terrain_obj.name)
-			else:
-				log.info("No terrain mesh found for snap")
-
-		# Helper: reproject and shift a list of (lon, lat, ele) points
-		def reproject_points(points):
-			pts_raw = [(p[0], p[1]) for p in points]
-			pts_prj = rprj.pts(pts_raw)
-			if self.useElevation:
-				return [(p[0] - dx, p[1] - dy, points[i][2]) for i, p in enumerate(pts_prj)]
-			else:
-				return [(p[0] - dx, p[1] - dy, 0.0) for p in pts_prj]
-
-		# Helper: build a curve object from 3D points
-		def make_curve_object(name, pts_3d, parent_collection):
-			if len(pts_3d) < 1:
-				return None
-			curve = bpy.data.curves.new(name, type='CURVE')
-			curve.dimensions = '3D'
-			spline = curve.splines.new('POLY')
-			spline.points.add(len(pts_3d) - 1)  # one point already exists
-			for i, pt in enumerate(pts_3d):
-				spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
-
-			obj = bpy.data.objects.new(name, curve)
-			parent_collection.objects.link(obj)
-			obj.select_set(True)
-			obj.show_in_front = True  # always visible on top of basemap
-
-			# Apply terrain snap + route width GN
-			if self.routeWidth > 0:
-				_apply_route_geonodes(obj, self.routeWidth, self.curveResolution, profile_int, terrain_obj)
-			elif terrain_obj is not None:
-				_apply_route_geonodes(obj, 0, self.curveResolution, profile_int, terrain_obj)
-
-			return obj
-
-		# --- Import Tracks ------------------------------------------------------
-		if self.importTracks and n_tracks > 0:
-			if self.separate:
-				trk_col = bpy.data.collections.new('Tracks')
-				collection.children.link(trk_col)
-			else:
-				trk_col = collection
-
-			merged_curve = None if self.separate else bpy.data.curves.new('Tracks', type='CURVE')
-			if merged_curve:
-				merged_curve.dimensions = '3D'
-
-			# Batch-reproject: collect all valid segments across all tracks into one
-			# flat lon/lat list, call rprj.pts() once, then slice results back.
-			_trk_segments = []  # list of (trk_name, seg_idx, seg_pts) for valid segments
-			_all_lonlat = []    # flat list of (lon, lat) for all points
-			_seg_slices = []    # (start, end) indices into _all_lonlat per segment
-
-			for trk_idx, trk in enumerate(gpx_data['tracks']):
-				trk_name = trk['name'] or f"Track {trk_idx + 1}"
-				for seg_idx, seg_pts in enumerate(trk['segments']):
-					if len(seg_pts) < 2:
-						continue
-					start = len(_all_lonlat)
-					_all_lonlat.extend((p[0], p[1]) for p in seg_pts)
-					_seg_slices.append((start, len(_all_lonlat)))
-					_trk_segments.append((trk_name, seg_idx, seg_pts))
-
-			if _all_lonlat:
-				try:
-					_all_prj = rprj.pts(_all_lonlat)
-				except Exception:
-					log.warning("Batch reprojection failed for tracks; falling back to per-segment")
-					_all_prj = None
-			else:
-				_all_prj = None
-
-			for (trk_name, seg_idx, seg_pts), (s, e) in zip(_trk_segments, _seg_slices):
-				try:
-					if _all_prj is not None:
-						prj_slice = _all_prj[s:e]
-						if self.useElevation:
-							pts_3d = [(p[0] - dx, p[1] - dy, seg_pts[i][2]) for i, p in enumerate(prj_slice)]
-						else:
-							pts_3d = [(p[0] - dx, p[1] - dy, 0.0) for p in prj_slice]
-					else:
-						pts_3d = reproject_points(seg_pts)
-				except Exception:
-					log.warning("Reprojection failed for track %s seg %d", trk_name, seg_idx)
-					continue
-
-				if self.separate:
-					# Determine number of segments for this track name to build the label
-					n_segs = sum(1 for (tn, _, _) in _trk_segments if tn == trk_name)
-					seg_name = trk_name if n_segs == 1 else f"{trk_name} seg{seg_idx + 1}"
-					obj = make_curve_object(seg_name, pts_3d, trk_col)
-					if obj is None:
-						continue
-					obj['gpx_type'] = 'track'
-					obj['gpx_name'] = trk_name
-					created_objects.append(obj)
-				else:
-					# Accumulate as splines in merged curve
-					spline = merged_curve.splines.new('POLY')
-					spline.points.add(len(pts_3d) - 1)
-					for i, pt in enumerate(pts_3d):
-						spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
-
-			# Finalise merged tracks
-			if not self.separate and merged_curve is not None:
-				if len(merged_curve.splines) > 0:
-					obj = bpy.data.objects.new('Tracks', merged_curve)
-					trk_col.objects.link(obj)
-					obj.select_set(True)
-					obj.show_in_front = True
-					if self.routeWidth > 0:
-						_apply_route_geonodes(obj, self.routeWidth, self.curveResolution, profile_int, terrain_obj)
-					elif terrain_obj is not None:
-						_apply_route_geonodes(obj, 0, self.curveResolution, profile_int, terrain_obj)
-					created_objects.append(obj)
-				else:
-					bpy.data.curves.remove(merged_curve)
-
-		# --- Import Routes ------------------------------------------------------
-		if self.importRoutes and n_routes > 0:
-			if self.separate:
-				rte_col = bpy.data.collections.new('Routes')
-				collection.children.link(rte_col)
-			else:
-				rte_col = collection
-
-			merged_curve = None if self.separate else bpy.data.curves.new('Routes', type='CURVE')
-			if merged_curve:
-				merged_curve.dimensions = '3D'
-
-			for rte_idx, rte in enumerate(gpx_data['routes']):
-				rte_name = rte['name'] or f"Route {rte_idx + 1}"
-				if len(rte['points']) < 2:
-					continue
-
-				try:
-					pts_3d = reproject_points(rte['points'])
-				except Exception:
-					log.warning("Reprojection failed for route %s", rte_name)
-					continue
-
-				if self.separate:
-					obj = make_curve_object(rte_name, pts_3d, rte_col)
-					if obj is None:
-						continue
-					obj['gpx_type'] = 'route'
-					obj['gpx_name'] = rte_name
-					created_objects.append(obj)
-				else:
-					spline = merged_curve.splines.new('POLY')
-					spline.points.add(len(pts_3d) - 1)
-					for i, pt in enumerate(pts_3d):
-						spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
-
-			if not self.separate and merged_curve is not None:
-				if len(merged_curve.splines) > 0:
-					obj = bpy.data.objects.new('Routes', merged_curve)
-					rte_col.objects.link(obj)
-					obj.select_set(True)
-					obj.show_in_front = True
-					if self.routeWidth > 0:
-						_apply_route_geonodes(obj, self.routeWidth, self.curveResolution, profile_int, terrain_obj)
-					elif terrain_obj is not None:
-						_apply_route_geonodes(obj, 0, self.curveResolution, profile_int, terrain_obj)
-					created_objects.append(obj)
-				else:
-					bpy.data.curves.remove(merged_curve)
-
-		# --- Import Waypoints ---------------------------------------------------
-		if self.importWaypoints and n_wpts > 0:
-			wpt_col = bpy.data.collections.new('Waypoints')
-			collection.children.link(wpt_col)
-
-			pts_raw = [(w[0], w[1]) for w in gpx_data['waypoints']]
-			try:
-				pts_prj = rprj.pts(pts_raw)
-			except Exception:
-				log.warning("Reprojection failed for waypoints")
-				pts_prj = []
-
-			for i, p in enumerate(pts_prj):
-				wpt = gpx_data['waypoints'][i]
-				wpt_name = wpt[3] or f"WPT {i + 1}"
-				ele = wpt[2] if self.useElevation else 0.0
-
-				# Create empty as waypoint marker
-				empty = bpy.data.objects.new(wpt_name, None)
-				empty.location = (p[0] - dx, p[1] - dy, ele)
-				empty.empty_display_type = 'PLAIN_AXES'
-				empty.empty_display_size = 10.0
-				empty.show_in_front = True
-				empty['gpx_type'] = 'waypoint'
-				empty['gpx_name'] = wpt_name
-				empty['gpx_ele'] = ele
-				wpt_col.objects.link(empty)
-				empty.select_set(True)
-				created_objects.append(empty)
-
-		# --- Finish -------------------------------------------------------------
-		total = len(created_objects)
-		if total == 0:
-			self.report({'WARNING'}, "No geometry imported from GPX file")
-			# Clean up empty collection
-			bpy.data.collections.remove(collection)
-			return {'CANCELLED'}
-
-		bbox = getBBOX.fromScn(scn)
-		adjust3Dview(context, bbox)
-
-		msg = f"Imported GPX: {n_tracks} track(s), {n_routes} route(s), {n_wpts} waypoint(s)"
-		self.report({'INFO'}, msg)
-		log.info(msg)
-
-		# Enable GPU overlay for route visibility on basemap
-		gpx_overlay_ensure()
-
-		# --- Auto-load basemap --------------------------------------------------
-		if self.autoBasemap:
-			bb = _gpx_bbox(gpx_data)
-			if bb:
-				min_lon, min_lat, max_lon, max_lat = bb
-				center_lon = (min_lon + max_lon) / 2.0
-				center_lat = (min_lat + max_lat) / 2.0
-
-				# Set scene origin to route center
-				cx, cy = reprojPt(4326, dstCRS, center_lon, center_lat)
-				geoscn.setOriginPrj(cx, cy)
-
-				# Shift all imported objects so they stay in place relative to new origin
-				old_dx, old_dy = dx, dy
-				new_dx, new_dy = cx, cy
-				shift_x = old_dx - new_dx
-				shift_y = old_dy - new_dy
-				for obj in created_objects:
-					obj.location.x += shift_x
-					obj.location.y += shift_y
-
-				# Set zoom level
-				zoom = _zoom_for_bbox(min_lon, min_lat, max_lon, max_lat)
-				geoscn.zoom = zoom
-				log.info("Auto-basemap: center=%.4f,%.4f zoom=%d", center_lon, center_lat, zoom)
-
-				# Open map viewer dialog
-				try:
-					bpy.ops.view3d.map_start('INVOKE_DEFAULT')
-				except Exception:
-					log.warning("Could not auto-start map viewer", exc_info=True)
-					self.report({'INFO'}, msg + " — use Basemap button to load map")
+		bpy.app.timers.register(_poll_gpx_thread, first_interval=0.5)
 
 		return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
+# Polling callback (runs on the main thread)
+# ---------------------------------------------------------------------------
+
+def _poll_gpx_thread():
+	"""Poll the GPX worker thread; build curves/objects once it has finished."""
+	global _gpx_thread, _gpx_result, _gpx_context_args
+	with _gpx_state_lock:
+		if _gpx_thread is None or _gpx_thread.is_alive():
+			return 0.5  # still running, poll again
+		# Thread finished — consume state under lock
+		_gpx_thread = None
+		result = _gpx_result
+		args = _gpx_context_args
+		_gpx_result = None
+		_gpx_context_args = None
+
+	# Always reset cursor at the end
+	def _reset_cursor():
+		try:
+			bpy.context.window.cursor_set('DEFAULT')
+		except Exception:
+			pass
+
+	if not result or not result.get('ok'):
+		err = result.get('error', 'Unknown error') if result else 'No result'
+		log.error("GPX import failed: %s", err)
+		_reset_cursor()
+		return None  # stop timer
+
+	gpx_data = result.get('gpx_data')
+	prepared = result.get('prepared')
+
+	try:
+		_build_gpx_objects_main_thread(args, gpx_data, prepared)
+	except Exception:
+		log.error("GPX object build failed", exc_info=True)
+	finally:
+		_reset_cursor()
+
+	return None  # stop timer
+
+
+def _build_gpx_objects_main_thread(args, gpx_data, prepared):
+	"""Build curves/objects from the worker's prepared 3D point lists.
+
+	MUST be called on the main thread — touches bpy.data extensively.
+	"""
+	context = bpy.context
+	scn = context.scene
+	geoscn = GeoScene(scn)
+
+	filepath = args['filepath']
+	importTracks = args['importTracks']
+	importRoutes = args['importRoutes']
+	importWaypoints = args['importWaypoints']
+	useElevation = args['useElevation']
+	separate = args['separate']
+	routeProfile = args['routeProfile']
+	routeWidth = args['routeWidth']
+	curveResolution = args['curveResolution']
+	snapToTerrain = args['snapToTerrain']
+	autoBasemap = args['autoBasemap']
+	dstCRS = args['dstCRS']
+	dx = args['dx']
+	dy = args['dy']
+
+	n_tracks = len(gpx_data['tracks'])
+	n_routes = len(gpx_data['routes'])
+	n_wpts = len(gpx_data['waypoints'])
+	log.info("GPX: %d tracks, %d routes, %d waypoints", n_tracks, n_routes, n_wpts)
+
+	# --- Collection ---------------------------------------------------------
+	gpx_name = os.path.splitext(os.path.basename(filepath))[0]
+	collection = bpy.data.collections.new(gpx_name)
+	scn.collection.children.link(collection)
+
+	created_objects = []
+
+	# --- Profile enum → int -------------------------------------------------
+	profile_int = 1 if routeProfile == 'TUBE' else 0
+
+	# --- Find terrain mesh for snap -----------------------------------------
+	terrain_obj = None
+	if snapToTerrain:
+		for obj in scn.objects:
+			if obj.type == 'MESH' and obj.name.startswith('EXPORT_'):
+				terrain_obj = obj
+				break
+		if terrain_obj is None:
+			for obj in scn.objects:
+				if obj.type == 'MESH' and any(k in obj.name.lower() for k in ('terrain', 'dem', 'srtm', 'elevation')):
+					terrain_obj = obj
+					break
+		if terrain_obj:
+			log.info("Will snap GPX to terrain: %s", terrain_obj.name)
+		else:
+			log.info("No terrain mesh found for snap")
+
+	# Helper: build a curve object from 3D points
+	def make_curve_object(name, pts_3d, parent_collection):
+		if len(pts_3d) < 1:
+			return None
+		curve = bpy.data.curves.new(name, type='CURVE')
+		curve.dimensions = '3D'
+		spline = curve.splines.new('POLY')
+		spline.points.add(len(pts_3d) - 1)  # one point already exists
+		for i, pt in enumerate(pts_3d):
+			spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
+
+		obj = bpy.data.objects.new(name, curve)
+		parent_collection.objects.link(obj)
+		obj.select_set(True)
+		obj.show_in_front = True  # always visible on top of basemap
+
+		# Apply terrain snap + route width GN
+		if routeWidth > 0:
+			_apply_route_geonodes(obj, routeWidth, curveResolution, profile_int, terrain_obj)
+		elif terrain_obj is not None:
+			_apply_route_geonodes(obj, 0, curveResolution, profile_int, terrain_obj)
+
+		return obj
+
+	# --- Import Tracks ------------------------------------------------------
+	if importTracks and prepared['tracks']:
+		if separate:
+			trk_col = bpy.data.collections.new('Tracks')
+			collection.children.link(trk_col)
+		else:
+			trk_col = collection
+
+		merged_curve = None if separate else bpy.data.curves.new('Tracks', type='CURVE')
+		if merged_curve:
+			merged_curve.dimensions = '3D'
+
+		# Count segments per track name to label multi-segment tracks
+		seg_count = {}
+		for trk_name, _seg_idx, _pts in prepared['tracks']:
+			seg_count[trk_name] = seg_count.get(trk_name, 0) + 1
+
+		for trk_name, seg_idx, pts_3d in prepared['tracks']:
+			if separate:
+				n_segs = seg_count.get(trk_name, 1)
+				seg_name = trk_name if n_segs == 1 else "{} seg{}".format(trk_name, seg_idx + 1)
+				obj = make_curve_object(seg_name, pts_3d, trk_col)
+				if obj is None:
+					continue
+				obj['gpx_type'] = 'track'
+				obj['gpx_name'] = trk_name
+				created_objects.append(obj)
+			else:
+				spline = merged_curve.splines.new('POLY')
+				spline.points.add(len(pts_3d) - 1)
+				for i, pt in enumerate(pts_3d):
+					spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
+
+		if not separate and merged_curve is not None:
+			if len(merged_curve.splines) > 0:
+				obj = bpy.data.objects.new('Tracks', merged_curve)
+				trk_col.objects.link(obj)
+				obj.select_set(True)
+				obj.show_in_front = True
+				if routeWidth > 0:
+					_apply_route_geonodes(obj, routeWidth, curveResolution, profile_int, terrain_obj)
+				elif terrain_obj is not None:
+					_apply_route_geonodes(obj, 0, curveResolution, profile_int, terrain_obj)
+				created_objects.append(obj)
+			else:
+				bpy.data.curves.remove(merged_curve)
+
+	# --- Import Routes ------------------------------------------------------
+	if importRoutes and prepared['routes']:
+		if separate:
+			rte_col = bpy.data.collections.new('Routes')
+			collection.children.link(rte_col)
+		else:
+			rte_col = collection
+
+		merged_curve = None if separate else bpy.data.curves.new('Routes', type='CURVE')
+		if merged_curve:
+			merged_curve.dimensions = '3D'
+
+		for rte_name, pts_3d in prepared['routes']:
+			if separate:
+				obj = make_curve_object(rte_name, pts_3d, rte_col)
+				if obj is None:
+					continue
+				obj['gpx_type'] = 'route'
+				obj['gpx_name'] = rte_name
+				created_objects.append(obj)
+			else:
+				spline = merged_curve.splines.new('POLY')
+				spline.points.add(len(pts_3d) - 1)
+				for i, pt in enumerate(pts_3d):
+					spline.points[i].co = (pt[0], pt[1], pt[2], 1.0)
+
+		if not separate and merged_curve is not None:
+			if len(merged_curve.splines) > 0:
+				obj = bpy.data.objects.new('Routes', merged_curve)
+				rte_col.objects.link(obj)
+				obj.select_set(True)
+				obj.show_in_front = True
+				if routeWidth > 0:
+					_apply_route_geonodes(obj, routeWidth, curveResolution, profile_int, terrain_obj)
+				elif terrain_obj is not None:
+					_apply_route_geonodes(obj, 0, curveResolution, profile_int, terrain_obj)
+				created_objects.append(obj)
+			else:
+				bpy.data.curves.remove(merged_curve)
+
+	# --- Import Waypoints ---------------------------------------------------
+	if importWaypoints and prepared['waypoints']:
+		wpt_col = bpy.data.collections.new('Waypoints')
+		collection.children.link(wpt_col)
+
+		for w_idx, x, y, z, name in prepared['waypoints']:
+			wpt_name = name or "WPT {}".format(w_idx + 1)
+
+			# Create empty as waypoint marker
+			empty = bpy.data.objects.new(wpt_name, None)
+			empty.location = (x, y, z)
+			empty.empty_display_type = 'PLAIN_AXES'
+			empty.empty_display_size = 10.0
+			empty.show_in_front = True
+			empty['gpx_type'] = 'waypoint'
+			empty['gpx_name'] = wpt_name
+			empty['gpx_ele'] = z
+			wpt_col.objects.link(empty)
+			empty.select_set(True)
+			created_objects.append(empty)
+
+	# --- Finish -------------------------------------------------------------
+	total = len(created_objects)
+	if total == 0:
+		log.warning("No geometry imported from GPX file")
+		# Clean up empty collection
+		bpy.data.collections.remove(collection)
+		return
+
+	bbox = getBBOX.fromScn(scn)
+	adjust3Dview(context, bbox)
+
+	msg = "Imported GPX: {} track(s), {} route(s), {} waypoint(s)".format(
+		n_tracks, n_routes, n_wpts)
+	log.info(msg)
+
+	# Enable GPU overlay for route visibility on basemap
+	gpx_overlay_ensure()
+
+	# --- Auto-load basemap --------------------------------------------------
+	if autoBasemap:
+		bb = _gpx_bbox(gpx_data)
+		if bb:
+			min_lon, min_lat, max_lon, max_lat = bb
+			center_lon = (min_lon + max_lon) / 2.0
+			center_lat = (min_lat + max_lat) / 2.0
+
+			# Set scene origin to route center
+			cx, cy = reprojPt(4326, dstCRS, center_lon, center_lat)
+			geoscn.setOriginPrj(cx, cy)
+
+			# Shift all imported objects so they stay in place relative to new origin
+			old_dx, old_dy = dx, dy
+			new_dx, new_dy = cx, cy
+			shift_x = old_dx - new_dx
+			shift_y = old_dy - new_dy
+			for obj in created_objects:
+				obj.location.x += shift_x
+				obj.location.y += shift_y
+
+			# Set zoom level
+			zoom = _zoom_for_bbox(min_lon, min_lat, max_lon, max_lat)
+			geoscn.zoom = zoom
+			log.info("Auto-basemap: center=%.4f,%.4f zoom=%d", center_lon, center_lat, zoom)
+
+			# Open map viewer dialog
+			try:
+				bpy.ops.view3d.map_start('INVOKE_DEFAULT')
+			except Exception:
+				log.warning("Could not auto-start map viewer", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
