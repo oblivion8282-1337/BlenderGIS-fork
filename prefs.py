@@ -727,25 +727,28 @@ class BGIS_PREFS(AddonPreferences):
 		row.operator("bgis.reset_dem_server", icon='PLAY_REVERSE')
 		# OpenTopography is a DEM service (not a tile provider); its key lives
 		# next to the DEM picker rather than in the basemap catalog.
-		# 4-state indicator next to the OpenTopography key.
-		# Icons chosen to be unmistakable in Blender's default theme:
-		#   empty     → 'X'            (faint X, neutral)
-		#   untested  → 'QUESTION'     (gray ?)
-		#   VALID     → 'CHECKBOX_HLT' (filled green checkbox, prominent)
-		#   INVALID   → 'CANCEL'       (red X, plus alert-highlighted field)
+		# 4-state indicator next to the OpenTopography key. Built-in icons are
+		# tinted by the active theme, so a "green check" via CHECKBOX_HLT can
+		# end up white on a dark theme. Use bundled custom PNGs (check_ok.png,
+		# check_fail.png) to render real green/red regardless of theme.
+		from . import icons_dict
+		def _icon_kw(name, fallback):
+			item = icons_dict.get(name) if icons_dict else None
+			return {'icon_value': item.icon_id} if item else {'icon': fallback}
+
 		key = self.opentopography_api_key
 		status = self.opentopography_key_status
 		if not key:
-			icon, badge = 'X', ''
+			icon_kw, badge = {'icon': 'X'}, ''
 		elif status == 'VALID':
-			icon, badge = 'CHECKBOX_HLT', 'valid'
+			icon_kw, badge = _icon_kw('check_ok', 'CHECKBOX_HLT'), 'valid'
 		elif status == 'INVALID':
-			icon, badge = 'CANCEL', 'invalid'
+			icon_kw, badge = _icon_kw('check_fail', 'CANCEL'), 'invalid'
 		else:
-			icon, badge = 'QUESTION', 'not tested'
+			icon_kw, badge = {'icon': 'QUESTION'}, 'not tested'
 
 		row = sub.row(align=True)
-		row.label(text='OpenTopography Key', icon=icon)
+		row.label(text='OpenTopography Key', **icon_kw)
 		# Highlight the prop field red when the key was rejected.
 		field_row = row.row(align=True)
 		field_row.alert = (status == 'INVALID')
@@ -754,12 +757,12 @@ class BGIS_PREFS(AddonPreferences):
 		op = row.operator('wm.url_open', icon='URL', text='')
 		op.url = 'https://portal.opentopography.org/myopentopo'
 
-		# Status badge underneath, with alert color when invalid — easier to spot
-		# than a small icon alone, especially for users new to Blender.
+		# Status badge underneath. Alert flag colors the row text red when invalid;
+		# the custom green icon already conveys success without alert styling.
 		if badge:
 			badge_row = sub.row()
 			badge_row.alert = (status == 'INVALID')
-			badge_row.label(text='Status: ' + badge, icon=icon)
+			badge_row.label(text='Status: ' + badge, **icon_kw)
 
 		# OSM tag list + Import/Export options
 		sub = box.box()
