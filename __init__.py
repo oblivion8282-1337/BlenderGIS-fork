@@ -568,10 +568,6 @@ def _submodule_steps():
 
 
 def register():
-	if bl_info['blender'] > bpy.app.version:
-		raise BlenderVersionError(
-			f"This addon requires Blender >= {bl_info['blender']}, "
-			f"got {tuple(bpy.app.version)}")
 	_install_global_hooks()
 	#icons
 	global icons_dict
