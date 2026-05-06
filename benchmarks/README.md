@@ -8,6 +8,15 @@ same workloads.
 
 ## TL;DR
 
+**UI-block time per importer (async refactor effect):**
+
+```
+ASC 200x200          ████████████  12.5×
+OSM 2000 nodes       ███████████████████████████████████  36×
+SHP-In 200 polys     █████████████████████████  25×
+GeoTIFF 256x256      ███  2.9×
+```
+
 **Live in-Blender pipeline (Map Viewer tile loading, Munich centre, 24 OSM tiles):**
 
 ```
@@ -35,7 +44,12 @@ See [`results.md`](results.md) for the full report.
 In a running Blender session with the addon enabled:
 
 ```python
+# Tile pipeline benchmark (Map Viewer cold/warm/warm² timings)
 exec(open('benchmarks/live_blender_bench.py').read())
+print(result)
+
+# Async UI-block benchmark (one row per importer)
+exec(open('benchmarks/async_ui_block_bench.py').read())
 print(result)
 ```
 
