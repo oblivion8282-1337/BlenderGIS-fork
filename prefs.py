@@ -60,18 +60,28 @@ def _load_credentials():
 		return {}
 
 def _save_credentials(data):
-	"""Save credentials dict to ~/.bgis/credentials.json with owner-only permissions."""
+	"""Save credentials dict to ~/.bgis/credentials.json with owner-only permissions.
+
+	Writes to a temporary sibling file first and atomically renames over the
+	destination so a crash mid-write cannot leave a half-truncated file."""
+	tmp_path = CREDENTIALS_FILE + '.tmp'
 	try:
 		flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-		fd = os.open(CREDENTIALS_FILE, flags, 0o600)
+		fd = os.open(tmp_path, flags, 0o600)
 		with os.fdopen(fd, 'w', encoding='utf-8') as f:
 			json.dump(data, f, indent=2)
 		try:
-			os.chmod(CREDENTIALS_FILE, 0o600)
+			os.chmod(tmp_path, 0o600)
 		except OSError:
 			pass
+		os.replace(tmp_path, CREDENTIALS_FILE)
 	except Exception:
 		log.error('Failed to save credentials file', exc_info=True)
+		try:
+			if os.path.exists(tmp_path):
+				os.remove(tmp_path)
+		except OSError:
+			pass
 
 def _sync_credential(prop_name, value):
 	"""Update a single key in the credentials file (synchronous variant)."""
@@ -220,12 +230,12 @@ DEFAULT_CRS = [
 DEFAULT_DEM_SERVER = [
 	("https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&west={W}&east={E}&south={S}&north={N}&outputFormat=GTiff&API_Key={API_KEY}", 'OpenTopography SRTM 30m', 'OpenTopography.org web service for SRTM 30m global DEM'),
 	("https://portal.opentopography.org/API/globaldem?demtype=SRTMGL3&west={W}&east={E}&south={S}&north={N}&outputFormat=GTiff&API_Key={API_KEY}", 'OpenTopography SRTM 90m', 'OpenTopography.org web service for SRTM 90m global DEM'),
-	("http://www.gmrt.org/services/GridServer?west={W}&east={E}&south={S}&north={N}&layer=topo&format=geotiff&resolution=high", 'Marine-geo.org GMRT', 'Marine-geo.org web service for GMRT global DEM (terrestrial (ASTER) and bathymetry)')
+	("https://www.gmrt.org/services/GridServer?west={W}&east={E}&south={S}&north={N}&layer=topo&format=geotiff&resolution=high", 'Marine-geo.org GMRT', 'Marine-geo.org web service for GMRT global DEM (terrestrial (ASTER) and bathymetry)')
 ]
 
 DEFAULT_OVERPASS_SERVER =  [
 	("https://lz4.overpass-api.de/api/interpreter", 'overpass-api.de', 'Main Overpass API instance'),
-	("http://overpass.openstreetmap.fr/api/interpreter", 'overpass.openstreetmap.fr', 'French Overpass API instance'),
+	("https://overpass.openstreetmap.fr/api/interpreter", 'overpass.openstreetmap.fr', 'French Overpass API instance'),
 	("https://overpass.kumi.systems/api/interpreter", 'overpass.kumi.systems', 'Kumi Systems Overpass Instance')
 ]
 
@@ -332,7 +342,12 @@ class BGIS_PREFS(AddonPreferences):
 		try:
 			return [tuple(elem) for elem in json.loads(self.predefCrsJson)]
 		except (json.JSONDecodeError, TypeError):
-			return [('NONE', 'Error loading data', '')]
+			log.warning('predefCrsJson corrupted, restoring DEFAULT_CRS', exc_info=True)
+			try:
+				self.predefCrsJson = json.dumps(DEFAULT_CRS)
+			except Exception:
+				log.error('Failed to restore default CRS list', exc_info=True)
+			return [tuple(elem) for elem in DEFAULT_CRS]
 
 	#store crs preset as json string into addon preferences
 	predefCrsJson: StringProperty(default=json.dumps(DEFAULT_CRS))
@@ -412,7 +427,13 @@ class BGIS_PREFS(AddonPreferences):
 			#put each item in a tuple (key, label, tooltip)
 			return [ (tag, tag, tag) for tag in tags]
 		except (json.JSONDecodeError, TypeError):
-			return [('NONE', 'Error loading data', '')]
+			log.warning('osmTagsJson corrupted, restoring DEFAULT_OSM_TAGS', exc_info=True)
+			try:
+				prefs = context.preferences.addons[PKG].preferences
+				prefs.osmTagsJson = json.dumps(DEFAULT_OSM_TAGS)
+			except Exception:
+				log.error('Failed to restore default OSM tags list', exc_info=True)
+			return [(tag, tag, tag) for tag in DEFAULT_OSM_TAGS]
 
 	osmTags: EnumProperty(
 		name = "OSM tags",
@@ -1298,16 +1319,15 @@ class BGIS_OT_cache_clear_expired(Operator):
 				continue
 			db_path = os.path.join(cache_dir, f)
 			try:
-				db = sqlite3.connect(db_path)
-				cursor = db.execute(
-					"DELETE FROM gpkg_tiles WHERE julianday('now','localtime') - julianday(last_modified) > ?",
-					(expiry,))
-				removed = cursor.rowcount
-				if removed > 0:
-					db.commit()
-					db.execute("VACUUM")
-					total_removed += removed
-				db.close()
+				with sqlite3.connect(db_path) as db:
+					cursor = db.execute(
+						"DELETE FROM gpkg_tiles WHERE julianday('now','localtime') - julianday(last_modified) > ?",
+						(expiry,))
+					removed = cursor.rowcount
+					if removed > 0:
+						db.commit()
+						db.execute("VACUUM")
+						total_removed += removed
 			except Exception as e:
 				log.warning("Cannot clean %s: %s", f, e)
 		_invalidate_cache_stats()
@@ -1341,6 +1361,8 @@ def _probe_tile_url(url, fmt, zmin):
 	leftovers = re.findall(r'\{[^}]+\}', test)
 	if leftovers:
 		return ('ERROR', 'Unresolved placeholders: {}'.format(', '.join(leftovers)))
+	if not is_safe_url(test):
+		return ('ERROR', 'Unsafe URL scheme')
 	try:
 		req = urllib.request.Request(test, headers={'User-Agent': 'CartoBlend tile probe'})
 		with urllib.request.urlopen(req, timeout=6) as resp:

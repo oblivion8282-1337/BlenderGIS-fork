@@ -37,10 +37,32 @@ else:
 #Imageio freeimage plugin
 try:
 	from .lib import imageio
-	imageio.plugins._freeimage.get_freeimage_lib() #try to download freeimage lib
 except Exception as e:
-	log.error("Cannot install ImageIO's Freeimage plugin", exc_info=True)
+	log.error("Cannot import ImageIO", exc_info=True)
 	HAS_IMGIO = False
 else:
 	HAS_IMGIO = True
-	log.debug('ImageIO Freeimage plugin available')
+	log.debug('ImageIO available (FreeImage lib will be fetched on demand)')
+
+
+_freeimage_ready = False
+
+def ensure_freeimage():
+	"""Lazily download/initialise the FreeImage shared library on first use.
+
+	Called by code paths that actually need ImageIO's FreeImage plugin so that
+	a synchronous network download never blocks the Blender UI thread at
+	addon import time.
+	"""
+	global _freeimage_ready
+	if not HAS_IMGIO or _freeimage_ready:
+		return _freeimage_ready
+	try:
+		from .lib import imageio
+		imageio.plugins._freeimage.get_freeimage_lib()
+		_freeimage_ready = True
+		log.debug('ImageIO Freeimage plugin available')
+	except Exception:
+		log.error("Cannot install ImageIO's Freeimage plugin", exc_info=True)
+		_freeimage_ready = False
+	return _freeimage_ready

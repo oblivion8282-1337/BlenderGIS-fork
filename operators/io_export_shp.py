@@ -142,9 +142,37 @@ class EXPORTGIS_OT_shapefile(Operator, ExportHelper):
 			# Track declared field names in a set so the per-property check below
 			# is O(1) instead of O(N_fields) per property per object.
 			knownFields = {f[0] for f in outShp.fields}
+			# fieldNameMap: origKey (full property name) → resolved shp field name.
+			# truncToOrig:  truncated-8-char name → the first origKey that claimed it.
+			# Together these detect when two different keys share the same truncation.
+			fieldNameMap = {}
+			truncToOrig = {}
 			for obj in objects:
 				for k, v in obj.items():
-					k = k[0:maxFieldNameLen]
+					origKey = k
+					if origKey in fieldNameMap:
+						# Already resolved in an earlier object; reuse the same name.
+						k = fieldNameMap[origKey]
+					else:
+						k = origKey[0:maxFieldNameLen]
+						# Resolve collision: if this truncated name is already claimed by a
+						# *different* original key, append a numeric suffix within 8 chars.
+						if k in truncToOrig and truncToOrig[k] != origKey:
+							suffix_n = 1
+							while True:
+								suffix = '_' + str(suffix_n)
+								candidate = k[0:maxFieldNameLen - len(suffix)] + suffix
+								if candidate not in knownFields:
+									log.warning(
+										"Field name collision: '{}' truncated to '{}' conflicts "
+										"with an existing field; renamed to '{}'.".format(
+											origKey, k, candidate))
+									k = candidate
+									break
+								suffix_n += 1
+						else:
+							truncToOrig[k] = origKey
+						fieldNameMap[origKey] = k
 					#evaluate the field type with the first value
 					if k not in knownFields:
 						if isinstance(v, float) or isinstance(v, int):
@@ -249,7 +277,8 @@ class EXPORTGIS_OT_shapefile(Operator, ExportHelper):
 				#Writing attributes Data
 				attributes = {'objId':i}
 				for k, v in obj.items():
-					k = k[0:maxFieldNameLen]
+					# Use the resolved field name (handles truncation + collision suffix)
+					k = fieldNameMap.get(k, k[0:maxFieldNameLen])
 					fType = fieldTypes.get(k)
 					if fType is None:
 						continue

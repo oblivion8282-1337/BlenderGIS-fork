@@ -56,7 +56,7 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 			try:
 				groupsTree.remove(nodeTree)
 				print(name+' has been deleted')
-			except:
+			except (RuntimeError, ReferenceError):
 				print('cannot delete '+name)
 		'''
 		if groupsTree.get('Normalize') is not None:
@@ -161,6 +161,17 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		# create separate xyz node
 		xyzSplitNode = node_tree.nodes.new('ShaderNodeSeparateXYZ')
 		xyzSplitNode.location = (-400, 0)
+		#  clamp Z to [-1, 1] before arccos to avoid NaN from numerical drift
+		clampMinNode = node_tree.nodes.new('ShaderNodeMath')
+		clampMinNode.operation = 'MINIMUM'
+		clampMinNode.location = (-350, 0)
+		clampMinNode.label = "Clamp max 1"
+		clampMinNode.inputs[1].default_value = 1.0
+		clampMaxNode = node_tree.nodes.new('ShaderNodeMath')
+		clampMaxNode.operation = 'MAXIMUM'
+		clampMaxNode.location = (-275, 0)
+		clampMaxNode.label = "Clamp min -1"
+		clampMaxNode.inputs[1].default_value = -1.0
 		#  create arc-cos node
 		arcCosNode = node_tree.nodes.new('ShaderNodeMath')
 		arcCosNode.operation = 'ARCCOSINE'
@@ -193,7 +204,9 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		# Connect the nodes
 		#node_tree.links.new(texCoordNode.outputs['Normal'] , xyzSplitNode.inputs['Vector'])
 		node_tree.links.new(geomNode.outputs['True Normal'] , xyzSplitNode.inputs['Vector'])
-		node_tree.links.new(xyzSplitNode.outputs['Z'] , arcCosNode.inputs[0])
+		node_tree.links.new(xyzSplitNode.outputs['Z'] , clampMinNode.inputs[0])
+		node_tree.links.new(clampMinNode.outputs[0] , clampMaxNode.inputs[0])
+		node_tree.links.new(clampMaxNode.outputs[0] , arcCosNode.inputs[0])
 		node_tree.links.new(arcCosNode.outputs[0] , rad2dg.inputs[0])
 		node_tree.links.new(rad2dg.outputs[0] , normalize.inputs[0])
 		node_tree.links.new(normalize.outputs[0] , colorRampNode.inputs['Fac'])
@@ -226,24 +239,20 @@ class TERRAIN_ANALYSIS_OT_build_nodes(Operator):
 		xyzSplitNode = node_tree.nodes.new('ShaderNodeSeparateXYZ')
 		xyzSplitNode.location = (-400, 200)
 		node_tree.links.new(geomNode.outputs['True Normal'] , xyzSplitNode.inputs['Vector'])
-		#  create maths nodes to compute aspect angle = atan(x/y)
-		xyDiv = node_tree.nodes.new('ShaderNodeMath')
-		xyDiv.operation = 'DIVIDE'
-		xyDiv.location = (-200,0)
-		node_tree.links.new(xyzSplitNode.outputs['X'] , xyDiv.inputs[0])
-		node_tree.links.new(xyzSplitNode.outputs['Y'] , xyDiv.inputs[1])
-		atanNode = node_tree.nodes.new('ShaderNodeMath')
-		atanNode.operation = 'ARCTANGENT'
-		atanNode.label = 'Aspect radians'
-		atanNode.location = (0,0)
-		node_tree.links.new(xyDiv.outputs[0] , atanNode.inputs[0])
+		#  compute aspect angle = atan2(x, y) — avoids division-by-zero when Y=0
+		atan2Node = node_tree.nodes.new('ShaderNodeMath')
+		atan2Node.operation = 'ARCTAN2'
+		atan2Node.label = 'Aspect radians'
+		atan2Node.location = (-200,0)
+		node_tree.links.new(xyzSplitNode.outputs['X'] , atan2Node.inputs[0])
+		node_tree.links.new(xyzSplitNode.outputs['Y'] , atan2Node.inputs[1])
 		#  create math node to convert radians to degrees
 		rad2dg = node_tree.nodes.new('ShaderNodeMath')
 		rad2dg.operation = 'MULTIPLY'
 		rad2dg.location = (200,0)
 		rad2dg.label = "Aspect degrees"
 		rad2dg.inputs[1].default_value = 180/math.pi
-		node_tree.links.new(atanNode.outputs[0] , rad2dg.inputs[0])
+		node_tree.links.new(atan2Node.outputs[0] , rad2dg.inputs[0])
 		# maths nodes --> if y < 0 then aspect = aspect + 180
 		yNegMask = node_tree.nodes.new('ShaderNodeMath')
 		yNegMask.operation = 'LESS_THAN'

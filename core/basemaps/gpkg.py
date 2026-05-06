@@ -44,7 +44,8 @@ class GeoPackage():
 		"""Read cache expiry from addon prefs. MUST be called from the main thread."""
 		try:
 			import bpy
-			prefs = bpy.context.preferences.addons['bl_ext.user_default.cartoblend'].preferences
+			pkg = __package__.split('.')[0]
+			prefs = bpy.context.preferences.addons[pkg].preferences
 			return prefs.cacheExpiry
 		except Exception:
 			log.debug('cacheExpiry pref unavailable, using default', exc_info=True)
@@ -320,7 +321,7 @@ class GeoPackage():
 		try:
 			# DB stores UTC ('datetime("now")'), so compare against utcnow() to
 			# avoid timezone drift in the cache-expiry calculation.
-			timeDelta = datetime.datetime.utcnow() - result[1]
+			timeDelta = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - result[1]
 			if timeDelta.days > self._get_max_days():
 				return None
 		except (TypeError, AttributeError):

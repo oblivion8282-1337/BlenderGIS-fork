@@ -766,15 +766,26 @@ class MapService():
 			url = self.urlTemplate['BASE_URL']
 			if url[-1] != '?' :
 				url += '?'
-			params = ['='.join([k,v]) for k, v in self.urlTemplate.items() if k != 'BASE_URL']
-			url += '&'.join(params)
-			url = url.replace("{LAY}", lay.urlKey)
-			url = url.replace("{FORMAT}", lay.format)
-			url = url.replace("{STYLE}", lay.style)
-			url = url.replace("{MATRIX}", self.matrix)
-			url = url.replace("{X}", str(col))
-			url = url.replace("{Y}", str(row))
-			url = url.replace("{Z}", str(zoom))
+			# Resolve placeholders against the param values BEFORE URL-encoding,
+			# otherwise urlencode would percent-encode the braces and the
+			# replace() calls below would miss them.
+			placeholders = {
+				"{LAY}": lay.urlKey,
+				"{FORMAT}": lay.format,
+				"{STYLE}": lay.style,
+				"{MATRIX}": self.matrix,
+				"{X}": str(col),
+				"{Y}": str(row),
+				"{Z}": str(zoom),
+			}
+			resolved = {}
+			for k, v in self.urlTemplate.items():
+				if k == 'BASE_URL':
+					continue
+				for ph, val in placeholders.items():
+					v = v.replace(ph, val)
+				resolved[k] = v
+			url += urllib.parse.urlencode(resolved)
 
 		if self.service == 'CDSE':
 			# CDSE uses Process API (POST), URL is just the endpoint
@@ -784,14 +795,6 @@ class MapService():
 			url = self.urlTemplate['BASE_URL']
 			if url[-1] != '?' :
 				url += '?'
-			params = ['='.join([k,v]) for k, v in self.urlTemplate.items() if k != 'BASE_URL']
-			url += '&'.join(params)
-			url = url.replace("{LAY}", lay.urlKey)
-			url = url.replace("{FORMAT}", lay.format)
-			url = url.replace("{STYLE}", lay.style)
-			url = url.replace("{CRS}", str(tm.CRS))
-			url = url.replace("{WIDTH}", str(tm.tileSize))
-			url = url.replace("{HEIGHT}", str(tm.tileSize))
 
 			xmin, ymax = tm.getTileCoords(col, row, zoom)
 			xmax = xmin + tm.tileSize * tm.getRes(zoom)
@@ -800,7 +803,27 @@ class MapService():
 				bbox = ','.join(map(str,[ymin,xmin,ymax,xmax]))
 			else:
 				bbox = ','.join(map(str,[xmin,ymin,xmax,ymax]))
-			url = url.replace("{BBOX}", bbox)
+
+			# Resolve placeholders against the param values BEFORE URL-encoding,
+			# otherwise urlencode would percent-encode the braces and the
+			# replace() calls below would miss them.
+			placeholders = {
+				"{LAY}": lay.urlKey,
+				"{FORMAT}": lay.format,
+				"{STYLE}": lay.style,
+				"{CRS}": str(tm.CRS),
+				"{WIDTH}": str(tm.tileSize),
+				"{HEIGHT}": str(tm.tileSize),
+				"{BBOX}": bbox,
+			}
+			resolved = {}
+			for k, v in self.urlTemplate.items():
+				if k == 'BASE_URL':
+					continue
+				for ph, val in placeholders.items():
+					v = v.replace(ph, val)
+				resolved[k] = v
+			url += urllib.parse.urlencode(resolved)
 
 		return url
 

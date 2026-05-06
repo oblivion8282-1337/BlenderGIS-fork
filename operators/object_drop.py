@@ -42,21 +42,22 @@ def get_align_matrix(location, normal):
 
 def get_lowest_world_co(ob, mat_parent=None):
     bme = bmesh.new()
-    bme.from_mesh(ob.data)
-    mat_to_world = ob.matrix_world.copy()
-    if mat_parent:
-        mat_to_world = mat_parent @ mat_to_world
-    lowest = None
-    if not bme.verts:
+    try:
+        bme.from_mesh(ob.data)
+        mat_to_world = ob.matrix_world.copy()
+        if mat_parent:
+            mat_to_world = mat_parent @ mat_to_world
+        if not bme.verts:
+            return None
+        lowest = None
+        for v in bme.verts:
+            if not lowest:
+                lowest = v
+            if (mat_to_world @ v.co).z < (mat_to_world @ lowest.co).z:
+                lowest = v
+        lowest_co = mat_to_world @ lowest.co
+    finally:
         bme.free()
-        return None
-    for v in bme.verts:
-        if not lowest:
-            lowest = v
-        if (mat_to_world @ v.co).z < (mat_to_world @ lowest.co).z:
-            lowest = v
-    lowest_co = mat_to_world @ lowest.co
-    bme.free()
 
     return lowest_co
 

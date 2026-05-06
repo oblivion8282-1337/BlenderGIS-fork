@@ -573,9 +573,27 @@ def register():
 	global icons_dict
 	icons_dict = iconsLib.new()
 	icons_dir = os.path.join(os.path.dirname(__file__), "icons")
-	for icon in os.listdir(icons_dir):
+	# Only attempt to load real image files; ignore subfolders, READMEs and any
+	# stray non-image artefacts that might live alongside the icons. Wrapping
+	# each load in try/except keeps a single bad/corrupt asset from bringing
+	# down the whole register() call.
+	_image_exts = {'.png', '.jpg', '.jpeg', '.svg'}
+	try:
+		_icon_files = os.listdir(icons_dir)
+	except OSError:
+		logger.exception('Could not list icons directory %s', icons_dir)
+		_icon_files = []
+	for icon in _icon_files:
 		name, ext = os.path.splitext(icon)
-		icons_dict.load(name, os.path.join(icons_dir, icon), 'IMAGE')
+		if ext.lower() not in _image_exts:
+			continue
+		icon_path = os.path.join(icons_dir, icon)
+		if not os.path.isfile(icon_path):
+			continue
+		try:
+			icons_dict.load(name, icon_path, 'IMAGE')
+		except Exception:
+			logger.exception('Failed to load icon %s', icon_path)
 
 	# Track every successful step so we can roll back on failure and leave
 	# Blender in a clean state instead of half-registered.
@@ -648,67 +666,82 @@ def register():
 		settings.mapbox_token = getattr(preferences, 'mapbox_token', '') or None
 		settings.thunderforest_api_key = getattr(preferences, 'thunderforest_api_key', '') or None
 		settings.stadia_api_key = getattr(preferences, 'stadia_api_key', '') or None
-	except KeyError:
-		logger.warning('Could not access addon preferences')
+	except (KeyError, AttributeError):
+		# KeyError: addon entry missing in bpy.context.preferences.addons.
+		# AttributeError: bpy.context.preferences is None (background/headless)
+		# or the prefs object lacks the expected logLevel/projEngine attributes.
+		logger.warning('Could not access addon preferences', exc_info=True)
 
 def unregister():
+	# Each step is wrapped in its own try/except so that a single failing
+	# submodule cannot leave Blender half-unregistered. We log every failure
+	# but always continue so as much state as possible is torn down.
+	def _safe(label, fn):
+		try:
+			fn()
+		except Exception:
+			logger.exception('unregister step failed: %s', label)
 
 	global icons_dict
-	iconsLib.remove(icons_dict)
+	_safe('icons', lambda: iconsLib.remove(icons_dict))
 
-	if not bpy.app.background: #no ui when running as background
+	def _remove_keymap():
+		if bpy.app.background:
+			return
 		wm = bpy.context.window_manager
 		kc = wm.keyconfigs.active
-		if kc is not None:
-			if '3D View' in kc.keymaps:
-				km = kc.keymaps['3D View']
-				if BASEMAPS:
-					items_to_remove = [kmi for kmi in km.keymap_items if kmi.idname == 'view3d.map_start']
-					for kmi in items_to_remove:
-						km.keymap_items.remove(kmi)
+		if kc is None or '3D View' not in kc.keymaps:
+			return
+		km = kc.keymaps['3D View']
+		if BASEMAPS:
+			items_to_remove = [kmi for kmi in km.keymap_items if kmi.idname == 'view3d.map_start']
+			for kmi in items_to_remove:
+				km.keymap_items.remove(kmi)
+	_safe('keymap', _remove_keymap)
 
-	geoscene.unregister()
+	_safe('geoscene', geoscene.unregister)
 
 	for panel in panels:
-		bpy.utils.unregister_class(panel)
+		_safe('panel:{}'.format(getattr(panel, '__name__', panel)),
+			lambda p=panel: bpy.utils.unregister_class(p))
 
-	bpy.utils.unregister_class(BGIS_OT_logs)
+	_safe('BGIS_OT_logs', lambda: bpy.utils.unregister_class(BGIS_OT_logs))
 
-	prefs.unregister()
+	_safe('prefs', prefs.unregister)
 	if BASEMAPS:
-		view3d_mapviewer.unregister()
+		_safe('view3d_mapviewer', view3d_mapviewer.unregister)
 	if IMPORT_GEORASTER:
-		io_import_georaster.unregister()
+		_safe('io_import_georaster', io_import_georaster.unregister)
 	if IMPORT_SHP:
-		io_import_shp.unregister()
+		_safe('io_import_shp', io_import_shp.unregister)
 	if EXPORT_SHP:
-		io_export_shp.unregister()
+		_safe('io_export_shp', io_export_shp.unregister)
 	if IMPORT_OSM:
-		io_import_osm.unregister()
+		_safe('io_import_osm', io_import_osm.unregister)
 	if IMPORT_ASC:
-		io_import_asc.unregister()
+		_safe('io_import_asc', io_import_asc.unregister)
 	if IMPORT_GEOJSON:
-		io_import_geojson.unregister()
+		_safe('io_import_geojson', io_import_geojson.unregister)
 	if IMPORT_GPX:
-		io_import_gpx.unregister()
+		_safe('io_import_gpx', io_import_gpx.unregister)
 	if DELAUNAY:
-		mesh_delaunay_voronoi.unregister()
+		_safe('mesh_delaunay_voronoi', mesh_delaunay_voronoi.unregister)
 	if DROP:
-		object_drop.unregister()
+		_safe('object_drop', object_drop.unregister)
 	if GET_DEM:
-		io_get_dem.unregister()
+		_safe('io_get_dem', io_get_dem.unregister)
 	if CAM_GEOPHOTO:
-		add_camera_exif.unregister()
+		_safe('add_camera_exif', add_camera_exif.unregister)
 	if CAM_GEOREF:
-		add_camera_georef.unregister()
+		_safe('add_camera_georef', add_camera_georef.unregister)
 	if TERRAIN_NODES:
-		nodes_terrain_analysis_builder.unregister()
+		_safe('nodes_terrain_analysis_builder', nodes_terrain_analysis_builder.unregister)
 	if TERRAIN_RECLASS:
-		nodes_terrain_analysis_reclassify.unregister()
+		_safe('nodes_terrain_analysis_reclassify', nodes_terrain_analysis_reclassify.unregister)
 	if EARTH_SPHERE:
-		mesh_earth_sphere.unregister()
+		_safe('mesh_earth_sphere', mesh_earth_sphere.unregister)
 
-	_uninstall_global_hooks()
+	_safe('global_hooks', _uninstall_global_hooks)
 
 if __name__ == "__main__":
 	register()

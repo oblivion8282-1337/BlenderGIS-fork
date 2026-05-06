@@ -32,8 +32,7 @@ def nominatimQuery(
     if user_agent:
         req.add_header('User-Agent', user_agent)
 
-    response = urlopen(req, timeout=TIMEOUT)
-
-    r = json.loads(response.read().decode('utf-8'))
+    with urlopen(req, timeout=TIMEOUT) as response:
+        r = json.loads(response.read().decode('utf-8'))
 
     return r

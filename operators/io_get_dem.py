@@ -26,6 +26,7 @@ PKG = __package__.rsplit('.', maxsplit=1)[0]  # bl_ext.user_default.cartoblend
 TIMEOUT = 120
 
 # Module-level state for background DEM download
+_dem_state_lock = threading.Lock()
 _dem_thread = None
 _dem_result = None   # dict with keys: 'filepath', 'onMesh', 'objectsLst', or 'error'
 _dem_context_args = None  # tuple of (filePath, onMesh, objectsLst) for the timer callback
@@ -38,14 +39,17 @@ def _dem_download_thread(url, filePath, result_holder):
 		with urlopen(rq, timeout=TIMEOUT) as response, open(filePath, 'wb') as outFile:
 			data = response.read()
 			outFile.write(data)
-		result_holder['ok'] = True
+		with _dem_state_lock:
+			result_holder['ok'] = True
 	except (URLError, HTTPError) as err:
-		result_holder['ok'] = False
-		result_holder['error'] = 'Http request fails url:{}, code:{}, error:{}'.format(
-			url, getattr(err, 'code', None), err.reason)
+		with _dem_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = 'Http request fails url:{}, code:{}, error:{}'.format(
+				url, getattr(err, 'code', None), err.reason)
 	except TimeoutError:
-		result_holder['ok'] = False
-		result_holder['error'] = 'Http request timed out. url:{}'.format(url)
+		with _dem_state_lock:
+			result_holder['ok'] = False
+			result_holder['error'] = 'Http request timed out. url:{}'.format(url)
 
 
 class IMPORTGIS_OT_dem_query(Operator):
@@ -163,29 +167,34 @@ class IMPORTGIS_OT_dem_query(Operator):
 		else:
 			objectsLst = None
 
-		# Start background download thread
+		# Start background download thread (guard with lock to prevent double-start)
 		global _dem_thread, _dem_result, _dem_context_args
-		_dem_result = {'ok': None, 'error': None, 'user_agent': USER_AGENT}
-		_dem_context_args = (filePath, onMesh, objectsLst)
-		_dem_thread = threading.Thread(
-			target=_dem_download_thread,
-			args=(url, filePath, _dem_result),
-			daemon=True)
-		_dem_thread.start()
+		with _dem_state_lock:
+			if _dem_thread is not None and _dem_thread.is_alive():
+				self.report({'INFO'}, "Download already running, please wait...")
+				return {'CANCELLED'}
+			_dem_result = {'ok': None, 'error': None, 'user_agent': USER_AGENT}
+			_dem_context_args = (filePath, onMesh, objectsLst)
+			_dem_thread = threading.Thread(
+				target=_dem_download_thread,
+				args=(url, filePath, _dem_result),
+				daemon=True)
+			_dem_thread.start()
 
 		self.report({'INFO'}, "Downloading DEM in background, please wait...")
 
 		# Register a timer to poll thread completion and trigger import
 		def _poll_dem_thread():
 			global _dem_thread, _dem_result, _dem_context_args
-			if _dem_thread is None or _dem_thread.is_alive():
-				return 0.5  # poll again in 0.5 s
-			# Thread finished
-			_dem_thread = None
-			result = _dem_result
-			args = _dem_context_args
-			_dem_result = None
-			_dem_context_args = None
+			with _dem_state_lock:
+				if _dem_thread is None or _dem_thread.is_alive():
+					return 0.5  # poll again in 0.5 s
+				# Thread finished — consume state under lock
+				_dem_thread = None
+				result = _dem_result
+				args = _dem_context_args
+				_dem_result = None
+				_dem_context_args = None
 
 			if not result or not result.get('ok'):
 				err = result.get('error', 'Unknown error') if result else 'No result'

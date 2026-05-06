@@ -930,8 +930,12 @@ class RECLASS_OT_export_svg(Operator):
 		for stop in stops:
 			color = Color(list(stop.color), 'rgba')
 			colorRamp.addStop(stop.position, color)
-		#write svg
-		svgPath = svgGradientFolder + self.name + '.svg'
+		#write svg — sanitize name to prevent path-traversal
+		safe_name = os.path.basename(self.name)
+		svgPath = svgGradientFolder + safe_name + '.svg'
+		if not os.path.realpath(svgPath).startswith(os.path.realpath(svgGradientFolder)):
+			self.report({'ERROR'}, "Invalid gradient name: path traversal detected")
+			return {'CANCELLED'}
 		if self.gradientType == "INTERPOLATE":
 			interpoGradient = colorRamp.getRangeColor(self.n, self.colorSpace, self.method)
 			interpoGradient.exportSVG(svgPath, self.makeDiscrete)

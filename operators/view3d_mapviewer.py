@@ -139,11 +139,10 @@ class BaseMap(GeoScene):
 			self.srv.resampAlg = alg
 		else:
 			log.warning('Unknown resampling algo %r in prefs, using default %r', alg, self.srv.resampAlg)
-		self.name = srckey + '_' + laykey + '_' + grdkey
-
 		#Set destination tile matrix
 		if grdkey is None:
 			grdkey = self.srv.srcGridKey
+		self.name = srckey + '_' + laykey + '_' + grdkey
 		if grdkey == self.srv.srcGridKey:
 			self.tm = self.srv.srcTms
 		else:

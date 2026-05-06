@@ -157,7 +157,11 @@ HIGHWAY_WIDTHS = {
 DEFAULT_STREET_WIDTH = 4
 
 
-def queryBuilder(bbox, tags=['building', 'highway'], types=['node', 'way', 'relation'], format='json'):
+def queryBuilder(bbox, tags=None, types=None, format='json'):
+		if tags is None:
+			tags = ['building', 'highway']
+		if types is None:
+			types = ['node', 'way', 'relation']
 
 		'''
 		QL template syntax :

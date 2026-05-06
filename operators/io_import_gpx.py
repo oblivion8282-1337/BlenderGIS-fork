@@ -40,10 +40,12 @@ def _detect_ns(root):
 
 def _reject_doctype(filepath):
 	# Block billion-laughs / entity-expansion DoS by refusing files with a DTD.
+	# Scan up to 32 MiB (consistent with io_import_osm.py) so a DOCTYPE hidden
+	# beyond the first 8 KiB cannot slip through.
+	MAX_SCAN = 32 * 1024 * 1024
 	with open(filepath, 'rb') as fh:
-		head = fh.read(8192)
-	lowered = head.lower()
-	if b'<!doctype' in lowered or b'<!entity' in lowered:
+		head = fh.read(MAX_SCAN).lower()
+	if b'<!doctype' in head or b'<!entity' in head:
 		raise ValueError("XML file contains a DOCTYPE/ENTITY declaration; refused for safety")
 
 

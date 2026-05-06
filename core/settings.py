@@ -68,7 +68,7 @@ class Settings():
 cfgFile = os.path.join(os.path.dirname(__file__), "settings.json")
 
 try:
-	with open(cfgFile, 'r') as cfg:
+	with open(cfgFile, 'r', encoding='utf-8') as cfg:
 		prefs = json.load(cfg)
 	settings = Settings(**prefs)
 except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:

@@ -20,7 +20,10 @@
 import logging
 log = logging.getLogger(__name__)
 
+import threading
+
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import (StringProperty, IntProperty, FloatProperty, BoolProperty,
 EnumProperty, FloatVectorProperty, PointerProperty)
 from bpy.types import Operator, Panel, PropertyGroup
@@ -34,10 +37,27 @@ from .operators.utils import mouseTo3d
 PKG = __package__
 
 # Cache for _moveObjLoc — rebuilt at most every 0.5 s to avoid iterating all
-# scene objects on every pan event.
+# scene objects on every pan event. The lock guards both reads and writes
+# because Blender's modal operators and worker threads can both call
+# _moveObjLoc, and a torn read of cache/time/scene-name would let a stale
+# entry be applied.
 _topParents_cache = None
 _topParents_time = 0
 _topParents_scene = None
+_topParents_lock = threading.Lock()
+
+
+@persistent
+def _invalidate_topParents_cache(scene=None, depsgraph=None):
+	"""depsgraph_update_post handler: drop the cache whenever the scene graph
+	changes (objects added/removed/reparented) so we never operate on a stale
+	parent list. Signature accepts the (scene, depsgraph) the handler is
+	called with. Marked @persistent so it survives file load."""
+	global _topParents_cache, _topParents_time, _topParents_scene
+	with _topParents_lock:
+		_topParents_cache = None
+		_topParents_time = 0
+		_topParents_scene = None
 
 '''
 Policy :
@@ -238,11 +258,20 @@ class GeoScene():
 		import time
 		global _topParents_cache, _topParents_time, _topParents_scene
 		now = time.monotonic()
-		if _topParents_cache is None or (now - _topParents_time) > 0.5 or _topParents_scene != self.scn.name:
-			_topParents_cache = [obj for obj in self.scn.objects if not obj.parent]
-			_topParents_time = now
-			_topParents_scene = self.scn.name
-		for obj in _topParents_cache:
+		# Guard the cache with a lock — Blender's modal operators and helper
+		# threads can both call into here. We snapshot the cached list under
+		# the lock and then iterate without it; the underlying ID pointers
+		# stay valid because the depsgraph handler invalidates the cache the
+		# moment scene topology changes.
+		with _topParents_lock:
+			if (_topParents_cache is None
+					or (now - _topParents_time) > 0.5
+					or _topParents_scene != self.scn.name):
+				_topParents_cache = [obj for obj in self.scn.objects if not obj.parent]
+				_topParents_time = now
+				_topParents_scene = self.scn.name
+			parents_snapshot = list(_topParents_cache)
+		for obj in parents_snapshot:
 			obj.location.x -= dx
 			obj.location.y -= dy
 
@@ -300,6 +329,10 @@ class GeoScene():
 		return self.scn.get(SK.LAT, None)
 	@lat.setter
 	def lat(self, v):
+		# Type-check first (mirrors crsx/crsy) so a None or string never reaches
+		# the comparison operator and surfaces as a TypeError.
+		if not isinstance(v, (int, float)) or isinstance(v, bool):
+			raise ValueError('Wrong latitude value '+str(v))
 		if -90 <= v <= 90:
 			self.scn[SK.LAT] = v
 			self._set_prop_ui(SK.LAT, description="Scene origin latitude", default=0.0, min=-90.0, max=90.0)
@@ -315,6 +348,10 @@ class GeoScene():
 		return self.scn.get(SK.LON, None)
 	@lon.setter
 	def lon(self, v):
+		# Type-check first (mirrors crsx/crsy) so a None or string never reaches
+		# the comparison operator and surfaces as a TypeError.
+		if not isinstance(v, (int, float)) or isinstance(v, bool):
+			raise ValueError('Wrong longitude value '+str(v))
 		if -180 <= v <= 180:
 			self.scn[SK.LON] = v
 			self._set_prop_ui(SK.LON, description="Scene origin longitude", default=0.0, min=-180.0, max=180.0)
@@ -862,8 +899,23 @@ def register():
 			bpy.utils.unregister_class(cls)
 			bpy.utils.register_class(cls)
 	bpy.types.WindowManager.geoscnProps = PointerProperty(type=GLOBAL_PROPS)
+	# Hook the cache-invalidator into the depsgraph. Idempotent: a reload
+	# during development must not stack multiple identical handlers.
+	if _invalidate_topParents_cache not in bpy.app.handlers.depsgraph_update_post:
+		bpy.app.handlers.depsgraph_update_post.append(_invalidate_topParents_cache)
 
 def unregister():
+	# Remove handler first; _invalidate_topParents_cache may still be called
+	# during shutdown, but pulling it out of the handler list now prevents
+	# Blender from invoking it once the rest of this module is torn down.
+	if _invalidate_topParents_cache in bpy.app.handlers.depsgraph_update_post:
+		try:
+			bpy.app.handlers.depsgraph_update_post.remove(_invalidate_topParents_cache)
+		except ValueError:
+			pass
+	# Drop any cached references to scene objects so we don't keep stale IDs
+	# alive after unregister.
+	_invalidate_topParents_cache()
 	del bpy.types.WindowManager.geoscnProps
 	for cls in classes:
 		bpy.utils.unregister_class(cls)
