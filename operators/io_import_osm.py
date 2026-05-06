@@ -251,7 +251,11 @@ def _get_or_create_building_geonodes():
 	n_random = nodes.new('FunctionNodeRandomValue')
 	n_random.data_type = 'FLOAT'
 	n_random.location = (-650, -350)
-	n_random.inputs[8].default_value = 42  # Seed
+	# Address by name — Blender 5.x exposes only the inputs relevant to the
+	# selected data_type (4 inputs: Min/Max/ID/Seed for FLOAT). Older Blender
+	# versions exposed all 9 type-specific inputs simultaneously which is why
+	# this used to be `inputs[8]`.
+	n_random.inputs['Seed'].default_value = 42
 
 	n_store_id = nodes.new('GeometryNodeStoreNamedAttribute')
 	n_store_id.data_type = 'FLOAT'
@@ -259,7 +263,7 @@ def _get_or_create_building_geonodes():
 	n_store_id.location = (-450, 0)
 	n_store_id.inputs[2].default_value = "building_id"  # Name
 	links.new(n_in.outputs['Geometry'], n_store_id.inputs[0])  # Geometry
-	links.new(n_random.outputs[1], n_store_id.inputs[3])  # Value (float output)
+	links.new(n_random.outputs['Value'], n_store_id.inputs[3])  # Value (float output)
 
 	# Named Attribute → read "height" (top, absolute) per face
 	n_attr_h = nodes.new('GeometryNodeInputNamedAttribute')
@@ -350,8 +354,8 @@ def _get_or_create_building_geonodes():
 	n_rs_gt.data_type = 'INT'
 	n_rs_gt.operation = 'GREATER_THAN'
 	n_rs_gt.location = (600, -400)
-	links.new(n_roof_shape.outputs['Attribute'], n_rs_gt.inputs[2])  # A (INT)
-	n_rs_gt.inputs[3].default_value = 0  # B (INT)
+	links.new(n_roof_shape.outputs['Attribute'], n_rs_gt.inputs['A'])
+	n_rs_gt.inputs['B'].default_value = 0
 
 	# AND: roof_shape > 0 AND Top (from first extrude)
 	n_roof_and = nodes.new('FunctionNodeBooleanMath')

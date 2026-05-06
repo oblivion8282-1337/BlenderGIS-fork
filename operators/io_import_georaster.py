@@ -85,6 +85,8 @@ class _RasterData:
 		'verts', 'faces',
 		# geometry (for new-plane modes)
 		'origin_updated', 'dx', 'dy',
+		# raw GeoRaster handle (used by Phase C to load image into bpy)
+		'_rast',
 	)
 
 	def __init__(self):
