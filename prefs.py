@@ -536,6 +536,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateMapTilerApiKey(self, context):
+		self.maptiler_key_status = 'UNKNOWN'
 		settings.maptiler_api_key = self.maptiler_api_key
 		_schedule_credential_sync('maptiler_api_key', self.maptiler_api_key)
 
@@ -547,6 +548,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateMapboxToken(self, context):
+		self.mapbox_token_status = 'UNKNOWN'
 		settings.mapbox_token = self.mapbox_token
 		_schedule_credential_sync('mapbox_token', self.mapbox_token)
 
@@ -558,6 +560,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateThunderforestApiKey(self, context):
+		self.thunderforest_key_status = 'UNKNOWN'
 		settings.thunderforest_api_key = self.thunderforest_api_key
 		_schedule_credential_sync('thunderforest_api_key', self.thunderforest_api_key)
 
@@ -569,6 +572,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateStadiaApiKey(self, context):
+		self.stadia_key_status = 'UNKNOWN'
 		settings.stadia_api_key = self.stadia_api_key
 		_schedule_credential_sync('stadia_api_key', self.stadia_api_key)
 
@@ -580,6 +584,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateCdseClientId(self, context):
+		self.cdse_credentials_status = 'UNKNOWN'
 		_schedule_credential_sync('cdse_client_id', self.cdse_client_id)
 
 	cdse_client_id: StringProperty(
@@ -590,6 +595,7 @@ class BGIS_PREFS(AddonPreferences):
 	)
 
 	def updateCdseClientSecret(self, context):
+		self.cdse_credentials_status = 'UNKNOWN'
 		_schedule_credential_sync('cdse_client_secret', self.cdse_client_secret)
 
 	cdse_client_secret: StringProperty(
@@ -598,6 +604,20 @@ class BGIS_PREFS(AddonPreferences):
 		subtype = 'PASSWORD',
 		update = updateCdseClientSecret
 	)
+
+	# Transient validation state for each tile-provider credential. Set by
+	# BGIS_OT_test_provider_credentials. SKIP_SAVE so they always start
+	# UNKNOWN at the next session — the user re-tests on demand.
+	_credential_status_items = [
+		('UNKNOWN', 'Not tested', 'Credential has not been tested yet'),
+		('VALID',   'Valid',      'Server accepted the credential'),
+		('INVALID', 'Invalid',    'Server rejected the credential'),
+	]
+	maptiler_key_status:       EnumProperty(items=_credential_status_items, default='UNKNOWN', options={'SKIP_SAVE'})
+	mapbox_token_status:       EnumProperty(items=_credential_status_items, default='UNKNOWN', options={'SKIP_SAVE'})
+	thunderforest_key_status:  EnumProperty(items=_credential_status_items, default='UNKNOWN', options={'SKIP_SAVE'})
+	stadia_key_status:         EnumProperty(items=_credential_status_items, default='UNKNOWN', options={'SKIP_SAVE'})
+	cdse_credentials_status:   EnumProperty(items=_credential_status_items, default='UNKNOWN', options={'SKIP_SAVE'})
 
 	################
 	#IO options
@@ -1428,6 +1448,64 @@ _SERVICE_REGISTER_URLS = {
 }
 
 
+# Per-service test configuration used by BGIS_OT_test_provider_credentials.
+# Each entry describes how to validate the credentials listed in
+# KEYED_SOURCES[srckey] (same attribute order):
+#   url_builder(values) -> URL to GET, must return image bytes whose magic
+#                          matches one of `magic` for a successful test.
+#   magic               -> tuple of expected response-body byte prefixes.
+#   status_attr         -> name of the EnumProperty on BGIS_PREFS that
+#                          holds the live test result.
+# CDSE is OAuth-based: instead of a tile probe it POSTs to the token endpoint
+# with grant_type=client_credentials and looks for an access_token in the
+# JSON response.
+_SERVICE_TEST_CONFIG = {
+	'MAPTILER': {
+		'url_builder': lambda v: 'https://api.maptiler.com/maps/streets-v2/0/0/0.png?key=' + v[0],
+		'magic': (b'\x89PNG', b'\xff\xd8\xff'),
+		'status_attr': 'maptiler_key_status',
+	},
+	'MAPBOX': {
+		'url_builder': lambda v: 'https://api.mapbox.com/v4/mapbox.satellite/0/0/0.jpg?access_token=' + v[0],
+		'magic': (b'\xff\xd8\xff', b'\x89PNG'),
+		'status_attr': 'mapbox_token_status',
+	},
+	'THUNDERFOREST': {
+		'url_builder': lambda v: 'https://tile.thunderforest.com/cycle/0/0/0.png?apikey=' + v[0],
+		'magic': (b'\x89PNG',),
+		'status_attr': 'thunderforest_key_status',
+	},
+	'STADIA': {
+		'url_builder': lambda v: 'https://tiles.stadiamaps.com/tiles/alidade_smooth/0/0/0.png?api_key=' + v[0],
+		'magic': (b'\x89PNG',),
+		'status_attr': 'stadia_key_status',
+	},
+	'CDSE_S2': {
+		'oauth': True,
+		'token_url': 'https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token',
+		'status_attr': 'cdse_credentials_status',
+	},
+}
+
+
+def _credential_status_icon(status, configured):
+	"""Return icon kwargs (`{'icon': ...}` or `{'icon_value': ...}`) reflecting
+	the credential test state. Custom green/red PNGs from icons_dict take
+	priority; fall back to built-in Blender icons if the previews dict is
+	empty (e.g. mid-register).
+	"""
+	from . import icons_dict
+	if not configured:
+		return {'icon': 'X'}
+	if status == 'VALID':
+		item = icons_dict.get('check_ok') if icons_dict else None
+		return {'icon_value': item.icon_id} if item else {'icon': 'CHECKBOX_HLT'}
+	if status == 'INVALID':
+		item = icons_dict.get('check_fail') if icons_dict else None
+		return {'icon_value': item.icon_id} if item else {'icon': 'CANCEL'}
+	return {'icon': 'QUESTION'}
+
+
 class GIS_UL_providers(UIList):
 	def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
 		row = layout.row(align=True)
@@ -1448,11 +1526,26 @@ class GIS_UL_providers(UIList):
 			row.label(text=item.display_name)
 			return
 		configured = all(getattr(prefs, a, '') for a in attrs)
+
+		# Resolve credential test status (UNKNOWN/VALID/INVALID) for this service.
+		test_cfg = _SERVICE_TEST_CONFIG.get(srckey, {})
+		status_attr = test_cfg.get('status_attr')
+		status = getattr(prefs, status_attr, 'UNKNOWN') if status_attr else 'UNKNOWN'
+		icon_kw = _credential_status_icon(status, configured)
+
 		split = row.split(factor=0.6, align=True)
-		split.label(text=item.display_name)
+		split.label(text=item.display_name, **icon_kw)
 		key_row = split.row(align=True)
+		# Red-tint the input fields when the test rejected the credentials.
+		key_row.alert = (status == 'INVALID')
 		for attr in attrs:
 			key_row.prop(prefs, attr, text='')
+		# Test button only when there's something to test (all fields filled
+		# AND we know how to validate this service).
+		if configured and status_attr:
+			op = key_row.operator('bgis.test_provider_credentials',
+				icon='FILE_REFRESH', text='')
+			op.service = srckey
 		if not configured:
 			register_url = _SERVICE_REGISTER_URLS.get(srckey)
 			if register_url:
@@ -1813,6 +1906,100 @@ class BGIS_OT_test_opentopography_key(Operator):
 		return {'CANCELLED'}
 
 
+class BGIS_OT_test_provider_credentials(Operator):
+	"""Send a test request to validate the credentials for a basemap provider"""
+	bl_idname = "bgis.test_provider_credentials"
+	bl_label = "Test provider credentials"
+	bl_description = "Send a small test request to verify the entered credentials work"
+	bl_options = {'INTERNAL'}
+
+	service: StringProperty(name='Service key', description='KEYED_SOURCES key, e.g. MAPTILER, MAPBOX, CDSE_S2')
+
+	def _popup(self, context, title, msg, icon='ERROR'):
+		def draw(s, c):
+			for line in msg.split('\n'):
+				s.layout.label(text=line)
+		context.window_manager.popup_menu(draw, title=title, icon=icon)
+
+	def _redraw_all(self, context):
+		for w in context.window_manager.windows:
+			for a in w.screen.areas:
+				a.tag_redraw()
+
+	def execute(self, context):
+		from urllib.request import Request, urlopen
+		from urllib.error import URLError, HTTPError
+		from urllib.parse import urlencode
+
+		cfg = _SERVICE_TEST_CONFIG.get(self.service)
+		if not cfg:
+			self._popup(context, "Unknown service", self.service)
+			return {'CANCELLED'}
+		prefs = context.preferences.addons[PKG].preferences
+		attrs = providers_mod.KEYED_SOURCES.get(self.service, ())
+		values = [getattr(prefs, a, '') for a in attrs]
+		status_attr = cfg['status_attr']
+		if not all(values):
+			self._popup(context, "Missing credential",
+				"Please fill all credential fields before testing.")
+			return {'CANCELLED'}
+
+		try:
+			if cfg.get('oauth'):
+				# OAuth client_credentials flow — POST form body to token endpoint.
+				body = urlencode({
+					'grant_type': 'client_credentials',
+					'client_id': values[0],
+					'client_secret': values[1],
+				}).encode('ascii')
+				req = Request(
+					cfg['token_url'], data=body,
+					headers={
+						'User-Agent': settings.user_agent,
+						'Content-Type': 'application/x-www-form-urlencoded',
+					})
+				with urlopen(req, timeout=15) as resp:
+					payload = resp.read(4096).decode('utf-8', errors='replace')
+				ok = '"access_token"' in payload
+			else:
+				req = Request(cfg['url_builder'](values),
+					headers={'User-Agent': settings.user_agent})
+				with urlopen(req, timeout=15) as resp:
+					head = resp.read(8)
+				ok = any(head.startswith(m) for m in cfg['magic'])
+		except HTTPError as e:
+			try:
+				err_body = e.read(200).decode('utf-8', errors='replace').strip()
+			except Exception:
+				err_body = ''
+			if e.code in (401, 403):
+				setattr(prefs, status_attr, 'INVALID')
+				self._popup(context, "Credentials rejected",
+					"Server returned HTTP %d.\nThe credentials are invalid or revoked." % e.code)
+			else:
+				self._popup(context, "Test failed",
+					"HTTP %d:\n%s" % (e.code, err_body[:120]))
+			self._redraw_all(context)
+			return {'CANCELLED'}
+		except URLError as e:
+			self._popup(context, "Network error", str(e.reason))
+			return {'CANCELLED'}
+		except Exception as e:
+			self._popup(context, "Test failed", str(e))
+			return {'CANCELLED'}
+
+		if ok:
+			setattr(prefs, status_attr, 'VALID')
+			self._redraw_all(context)
+			return {'FINISHED'}
+		setattr(prefs, status_attr, 'INVALID')
+		self._popup(context, "Unexpected response",
+			"Server returned HTTP 200 but the body is not what we expected.\n"
+			"The credentials may be invalid.")
+		self._redraw_all(context)
+		return {'CANCELLED'}
+
+
 classes = [
 GIS_PG_provider_row,
 GIS_UL_providers,
@@ -1842,6 +2029,7 @@ BGIS_OT_remove_provider,
 BGIS_OT_reset_providers,
 BGIS_OT_import_xyz_catalog,
 BGIS_OT_test_opentopography_key,
+BGIS_OT_test_provider_credentials,
 ]
 
 def register():
