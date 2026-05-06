@@ -25,7 +25,7 @@ _osm_result = None    # dict: {'ok': bool, 'data': overpy.Result | None, 'error'
 _osm_args = None      # tuple of arguments needed by the polling callback to run Phase C
 
 from ..geoscene import GeoScene
-from .utils import adjust3Dview, getBBOX, DropToGround, isTopView, hasBasemapPlane
+from .utils import adjust3Dview, getBBOX, DropToGround, isTopView, hasBasemapPlane, set_geonodes_input
 
 from ..core.proj import Reproj, reprojBbox, reprojPt, utm
 from ..core.utils import perf_clock
@@ -862,7 +862,7 @@ def _apply_terrain_snap(obj, terrain_obj):
 	# Set terrain object
 	for item in group.interface.items_tree:
 		if item.name == 'Terrain':
-			mod[item.identifier] = terrain_obj
+			set_geonodes_input(mod, item.identifier, terrain_obj)
 	# Move to top of modifier stack
 	idx = obj.modifiers.find(mod.name)
 	if idx > 0:

@@ -6,6 +6,22 @@ from bpy_extras.view3d_utils import region_2d_to_location_3d, region_2d_to_vecto
 
 from ...core import BBOX
 
+def set_geonodes_input(mod, identifier, value):
+	"""Set a Geometry Nodes modifier input by socket identifier.
+
+	Blender 5.0 removed the legacy ``mod[identifier] = value`` IDProperty path
+	on NodesModifier. The new collection is ``mod.properties.inputs[id]['value']``,
+	but the IDProperty backing storage is created lazily — a plain attribute read
+	via ``getattr`` triggers it so the subsequent subscript assignment works on
+	freshly-added modifiers.
+	"""
+	if bpy.app.version >= (5, 0):
+		getattr(mod.properties.inputs, identifier, None)
+		mod.properties.inputs[identifier]['value'] = value
+	else:
+		mod[identifier] = value
+
+
 def isTopView(context):
 	if context.area is None or context.area.type != 'VIEW_3D':
 		return False

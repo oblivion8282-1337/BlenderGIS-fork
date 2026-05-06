@@ -50,7 +50,7 @@ from ..geoscene import GeoScene, SK, georefManagerLayout
 from ..prefs import PredefCRS
 
 #utilities
-from .utils import getBBOX, mouseTo3d
+from .utils import getBBOX, mouseTo3d, set_geonodes_input
 from .utils import placeObj, adjust3Dview, showTextures, rasterExtentToMesh, geoRastUVmap, addTexture #for export to mesh tool
 
 #OSM Nominatim API module
@@ -1354,7 +1354,7 @@ class VIEW3D_OT_map_viewer(Operator):
 			snap_mod.node_group = snap_ng
 			for item in snap_ng.interface.items_tree:
 				if item.name == 'Terrain' and hasattr(item, 'identifier'):
-					snap_mod[item.identifier] = terrain_obj
+					set_geonodes_input(snap_mod, item.identifier, terrain_obj)
 					break
 			# Move snap modifier to top so it runs before other modifiers
 			idx = list(obj.modifiers).index(snap_mod)

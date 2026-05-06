@@ -11,7 +11,7 @@ from bpy.props import StringProperty, BoolProperty, FloatProperty, EnumProperty
 
 from ..geoscene import GeoScene
 from ..core.proj import Reproj, reprojPt, utm
-from .utils import adjust3Dview, getBBOX
+from .utils import adjust3Dview, getBBOX, set_geonodes_input
 
 import gpu
 from gpu_extras.batch import batch_for_shader
@@ -660,7 +660,7 @@ def _apply_route_geonodes(obj, width=3.0, resolution=2.0, profile=0, terrain_obj
 		snap_mod.node_group = snap_ng
 		for item in snap_ng.interface.items_tree:
 			if item.name == 'Terrain' and hasattr(item, 'identifier'):
-				snap_mod[item.identifier] = terrain_obj
+				set_geonodes_input(snap_mod, item.identifier, terrain_obj)
 				break
 
 	# Route width + smoothing + profile (skip if width=0: keep as edges only)
@@ -674,13 +674,13 @@ def _apply_route_geonodes(obj, width=3.0, resolution=2.0, profile=0, terrain_obj
 			if not hasattr(item, 'identifier'):
 				continue
 			if item.name == 'Width':
-				mod[item.identifier] = width
+				set_geonodes_input(mod, item.identifier, width)
 			elif item.name == 'Smoothing':
-				mod[item.identifier] = resolution
+				set_geonodes_input(mod, item.identifier, resolution)
 			elif item.name == 'Profile':
-				mod[item.identifier] = profile
+				set_geonodes_input(mod, item.identifier, profile)
 			elif item.name == 'Merge Dist':
-				mod[item.identifier] = width * 0.5
+				set_geonodes_input(mod, item.identifier, width * 0.5)
 
 		# Material
 		mat = _get_or_create_route_material()
