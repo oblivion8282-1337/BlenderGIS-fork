@@ -5,7 +5,7 @@ name = "CartoBlend"
 tagline = "GIS toolkit for Blender — basemaps, OSM, DEM, GPX and more"
 maintainer = "oblivion"
 type = "add-on"
-website = "https://github.com/oblivion8282-1337/BlenderGIS-fork"
+website = "https://github.com/oblivion8282-1337/cartoblend"
 
 tags = ["3D View", "Import-Export", "Scene"]
 

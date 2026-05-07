@@ -1,25 +1,81 @@
-Blender GIS
-==========
-Blender minimum version required : v2.83
+# CartoBlend
 
-Note : Since 2022, the OpenTopography web service requires an API key. Please register to opentopography.org and request a key. This service is still free.
+GIS toolkit for Blender — basemaps, OSM, DEM, GPX and more.
 
+**Requires Blender 4.2 or newer.**
 
-[Wiki](https://github.com/domlysz/BlenderGIS/wiki/Home) - [FAQ](https://github.com/domlysz/BlenderGIS/wiki/FAQ) - [Quick start guide](https://github.com/domlysz/BlenderGIS/wiki/Quick-start) - [Flowchart](https://raw.githubusercontent.com/wiki/domlysz/blenderGIS/flowchart.jpg)
---------------------
+> Fork of [BlenderGIS](https://github.com/domlysz/BlenderGIS) by domlysz, updated for the Blender extension system and modern map tile providers.
 
-## Functionalities overview
+---
 
-**GIS datafile import :** Import in Blender most commons GIS data format : Shapefile vector, raster image, geotiff DEM, OpenStreetMap xml.
+## Features
 
-There are a lot of possibilities to create a 3D terrain from geographic data with BlenderGIS, check the [Flowchart](https://raw.githubusercontent.com/wiki/domlysz/blenderGIS/flowchart.jpg) to have an overview.
+**Interactive basemap viewer** — display live web maps directly in the 3D viewport (MapTiler, Mapbox, Thunderforest, Stadia, OpenStreetMap and more). Pan, zoom, search places, then export the visible area as a mesh.
 
-Exemple : import vector contour lines, create faces by triangulation and put a topographic raster texture.
+**Elevation data** — fetch real terrain elevation from [OpenTopography](https://opentopography.org) (API key required, free registration).
 
-![](https://raw.githubusercontent.com/wiki/domlysz/blenderGIS/Blender28x/gif/bgis_demo_delaunay.gif)
+**OpenStreetMap** — import buildings, roads, and other map features as 3D geometry.
 
-**Grab geodata directly from the web :** display dynamics web maps inside Blender 3d view, requests for OpenStreetMap data (buildings, roads ...), get true elevation data from the NASA SRTM mission.
+**GIS file import:**
+- Shapefile (`.shp`)
+- Georeferenced raster / GeoTIFF
+- OpenStreetMap (`.osm`)
+- GeoJSON (`.geojson`)
+- GPX track (`.gpx`)
+- ESRI ASCII Grid (`.asc`)
 
-![](https://raw.githubusercontent.com/wiki/domlysz/blenderGIS/Blender28x/gif/bgis_demo_webdata.gif)
+**Export:** Shapefile (`.shp`)
 
-**And more :** Manage georeferencing informations of a scene, compute a terrain mesh by Delaunay triangulation, drop objects on a terrain mesh, make terrain analysis using shader nodes, setup new cameras from geotagged photos, setup a camera to render with Blender a new georeferenced raster.
+**Mesh tools:** Delaunay triangulation, Voronoi diagram, Drop to Ground, longitude/latitude to sphere, Earth curvature correction.
+
+**Camera tools:** Georeferenced render setup, geotagged photo camera setup (EXIF).
+
+**Terrain analysis:** Generate shader node setups for slope, aspect, and reclassification.
+
+---
+
+## Installation
+
+Download the latest release ZIP from the [Releases](https://github.com/oblivion8282-1337/cartoblend/releases) page.
+
+In Blender: *Edit → Preferences → Extensions → Install from Disk*, then select the ZIP. The extension will appear under *User Default* extensions. Enable it and restart if prompted.
+
+The release ZIP includes bundled wheels for **PyProj** and **Pillow** — no manual dependency installation needed. GDAL is optional; the addon falls back to its built-in raster handling when it is not present.
+
+---
+
+## API Keys
+
+Some basemap providers require an API key. Enter them under *Edit → Preferences → Add-ons → CartoBlend*.
+
+| Provider | Where to get a key |
+|---|---|
+| MapTiler | [maptiler.com](https://maptiler.com) |
+| Mapbox | [mapbox.com](https://mapbox.com) |
+| Thunderforest | [thunderforest.com](https://thunderforest.com) |
+| Stadia Maps | [stadiamaps.com](https://stadiamaps.com) |
+| OpenTopography | [opentopography.org](https://opentopography.org) |
+
+---
+
+## Map Viewer Shortcuts
+
+| Key | Action |
+|---|---|
+| Scroll / `+` / `-` | Map zoom |
+| `Ctrl` + Scroll | View zoom (no tile reload) |
+| `Alt` + Scroll | Zoom ×10 |
+| LMB / MMB drag | Pan map |
+| `Ctrl` + Drag | Pan view only |
+| Numpad 2/4/6/8 | Pan direction |
+| `B` | Zoom box |
+| `G` | Go to (search place) |
+| `E` | Export as mesh |
+| `Space` | Switch layer/source |
+| `ESC` | Exit |
+
+---
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
