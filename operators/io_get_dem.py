@@ -41,11 +41,19 @@ def _dem_download_thread(url, filePath, result_holder):
 			shutil.copyfileobj(response, outFile, length=1 << 20)  # 1 MB-Chunks, kein RAM-Spike
 		with _dem_state_lock:
 			result_holder['ok'] = True
-	except (URLError, HTTPError) as err:
+	except HTTPError as err:
+		with _dem_state_lock:
+			result_holder['ok'] = False
+			if err.code == 429:
+				result_holder['error'] = 'OpenTopography rate limit exceeded — please wait a moment and try again'
+			else:
+				result_holder['error'] = 'Http request fails url:{}, code:{}, error:{}'.format(
+					mask_url(url), err.code, err.reason)
+	except URLError as err:
 		with _dem_state_lock:
 			result_holder['ok'] = False
 			result_holder['error'] = 'Http request fails url:{}, code:{}, error:{}'.format(
-				url, getattr(err, 'code', None), err.reason)
+				mask_url(url), getattr(err, 'code', None), err.reason)
 	except TimeoutError:
 		with _dem_state_lock:
 			result_holder['ok'] = False

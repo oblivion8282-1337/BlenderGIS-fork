@@ -15,6 +15,7 @@ from .core.checkdeps import HAS_GDAL, HAS_PYPROJ, HAS_PIL, HAS_IMGIO
 from .core.basemaps import providers as providers_mod
 from .core.basemaps.providers import is_safe_url
 from .core import settings
+from .core.utils.secrets import mask_url
 
 PKG = __package__
 
@@ -851,8 +852,7 @@ class BGIS_OT_add_predef_crs(Operator):
 		apiKey = settings.maptiler_api_key
 
 		if not apiKey:
-			#self.report({'ERROR'}, "MapTiler API key is required. Please set it in the preferences.") #report is not available outside of the execute function
-			log.error("No Maptiler API key")
+			log.warning("No Maptiler API key configured")
 			return
 
 		mtc = MapTilerCoordinates(apiKey=apiKey)
@@ -1862,6 +1862,7 @@ class BGIS_OT_test_opentopography_key(Operator):
 			"&south=48.10&north=48.11&outputFormat=GTiff"
 			"&API_Key=" + key
 		)
+		log.debug(mask_url(url))
 		req = Request(url, headers={'User-Agent': settings.user_agent})
 		try:
 			with urlopen(req, timeout=15) as resp:
@@ -1960,7 +1961,15 @@ class BGIS_OT_test_provider_credentials(Operator):
 					})
 				with urlopen(req, timeout=15) as resp:
 					payload = resp.read(4096).decode('utf-8', errors='replace')
-				ok = '"access_token"' in payload
+				try:
+					token_data = json.loads(payload)
+					ok = 'access_token' in token_data
+				except json.JSONDecodeError:
+					setattr(prefs, status_attr, 'INVALID')
+					self._popup(context, "Unexpected response",
+						"Token endpoint returned non-JSON data.")
+					self._redraw_all(context)
+					return {'CANCELLED'}
 			else:
 				req = Request(cfg['url_builder'](values),
 					headers={'User-Agent': settings.user_agent})

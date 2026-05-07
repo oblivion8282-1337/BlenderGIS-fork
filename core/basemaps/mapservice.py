@@ -99,29 +99,41 @@ class CDSEAuth():
 				log.error("CDSE credentials not configured. Set them in CartoBlend Preferences.")
 				return None
 
-			try:
-				data = urllib.parse.urlencode({
-					'grant_type': 'client_credentials',
-					'client_id': client_id,
-					'client_secret': client_secret,
-				}).encode('utf-8')
+			data = urllib.parse.urlencode({
+				'grant_type': 'client_credentials',
+				'client_id': client_id,
+				'client_secret': client_secret,
+			}).encode('utf-8')
 
-				req = urllib.request.Request(self.TOKEN_URL, data=data, method='POST')
-				req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+			req = urllib.request.Request(self.TOKEN_URL, data=data, method='POST')
+			req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+			ctx = ssl.create_default_context()
 
-				ctx = ssl.create_default_context()
-				with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-					result = json.loads(resp.read().decode('utf-8'))
+			last_exc = None
+			for attempt in range(2):
+				try:
+					with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+						result = json.loads(resp.read().decode('utf-8'))
+					self._token = result['access_token']
+					self._expires_at = time.time() + result.get('expires_in', 300)
+					log.debug("CDSE token obtained, expires in {}s".format(result.get('expires_in', '?')))
+					return self._token
+				except urllib.error.HTTPError as e:
+					log.error("Failed to get CDSE token: HTTP {}".format(e.code))
+					self._token = None
+					return None
+				except (urllib.error.URLError, OSError) as e:
+					last_exc = e
+					if attempt == 0:
+						log.warning("Transient error fetching CDSE token (attempt 1): {}. Retrying…".format(e))
+				except Exception as e:
+					log.error("Failed to get CDSE token: {}".format(e))
+					self._token = None
+					return None
 
-				self._token = result['access_token']
-				self._expires_at = time.time() + result.get('expires_in', 300)
-				log.debug("CDSE token obtained, expires in {}s".format(result.get('expires_in', '?')))
-				return self._token
-
-			except Exception as e:
-				log.error("Failed to get CDSE token: {}".format(e))
-				self._token = None
-				return None
+			log.error("Failed to get CDSE token after retry: {}".format(last_exc))
+			self._token = None
+			return None
 
 # Singleton
 _cdse_auth = CDSEAuth()
